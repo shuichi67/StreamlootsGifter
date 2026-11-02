@@ -1,2 +1,2 @@
-# StreamlootsGifter-Releases
+# StreamlootsGifter
 Automatic pack gifter for Streamloots
