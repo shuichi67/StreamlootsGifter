@@ -2,7 +2,7 @@
 
 **A Windows desktop app for automating Streamloots gifts triggered by Twitch channel point redeems and Streamloots card redeems.**
 
-[Download the latest release]([https://github.com/shuichi67/StreamlootsGifter/releases/latest](https://github.com/shuichi67/StreamlootsGifter/releases/tag/v0.5.0)) · [View all releases](https://github.com/shuichi67/StreamlootsGifter/releases)
+[Download the latest release](https://github.com/shuichi67/StreamlootsGifter/releases/tag/v0.5.0) · [View all releases](https://github.com/shuichi67/StreamlootsGifter/releases)
 
 Streamloots Gifter connects Twitch redeems and Streamloots card activity to configured gifts. It runs on the streamer’s PC and pairs with a browser extension to monitor the Streamloots Activity Feed and carry out gifts.
 
