@@ -54,11 +54,12 @@ then uncomment and update this line:
 
 ### 3. Add credentials to `.env`
 
-In the extracted app folder, open `.env` with Notepad. Fill in the values:
+In the extracted app folder, open `.env` with Notepad and fill in these values:
 
-```env
+```text
 TWITCH_CLIENT_ID=your_client_id
 TWITCH_CLIENT_SECRET=your_client_secret
+```
 
 Do not add quotation marks or spaces around the `=` signs. Save the file, then start `StreamlootsGifter.exe`.
 
