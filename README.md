@@ -56,7 +56,7 @@ then uncomment and update this line:
 
 In the extracted app folder, open `.env` with Notepad. Fill in the values:
 
-```env`
+```env
 TWITCH_CLIENT_ID=your_client_id
 TWITCH_CLIENT_SECRET=your_client_secret
 
