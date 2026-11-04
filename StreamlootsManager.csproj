@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>StreamlootsManager</RootNamespace>
+    <AssemblyName>StreamlootsGifter</AssemblyName>
+    <Version>0.5.6</Version>
+    <ApplicationIcon>Assets\StreamlootsGifter.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="Assets\StreamlootsGifter.ico" />
+  </ItemGroup>
+</Project>

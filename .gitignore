@@ -1,0 +1,15 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+bin/
+obj/
+.streamloots_bridge_key
+gift_queue.json
+gift_queue.json.tmp
+config.json
+dist/
+StreamerShare/
+StreamerShare - Copy/
+StreamerShare.rar
