@@ -38,7 +38,7 @@
             <TextBlock Text="STREAMLOOTS GIFTER" Foreground="#91A4FF" FontSize="10" FontWeight="Bold" Margin="0,0,0,8"/>
             <TextBlock Text="Welcome back" FontSize="28" FontWeight="Bold"/>
             <TextBlock Text="Connect Twitch to open your gifting dashboard." Foreground="{DynamicResource MutedBrush}" Margin="0,5,0,24"/>
-            <TextBlock x:Name="LoginStatus" Text="Not connected" Foreground="{DynamicResource MutedBrush}" FontWeight="Bold" Margin="0,0,0,6"/>
+            <TextBlock x:Name="LoginStatus" Text="Not connected" Foreground="{DynamicResource MutedBrush}" FontWeight="Bold" TextWrapping="Wrap" MaxWidth="390" Margin="0,0,0,6"/>
             <TextBlock x:Name="LoginError" TextWrapping="Wrap" Foreground="{DynamicResource RedBrush}" Margin="0,0,0,12"/>
             <Button x:Name="LoginButton" Content="Continue with Twitch" Background="{DynamicResource AccentBrush}" Foreground="White" FontWeight="Bold" Height="42" Click="LoginButton_Click"/>
           </StackPanel>
@@ -68,26 +68,16 @@
             </Border>
             <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="22,18">
               <StackPanel>
-                <TextBlock Text="1  Create a Twitch application" FontSize="16" FontWeight="Bold" Margin="0,0,0,8"/>
-                <TextBlock Text="Open the Twitch Developer Console and sign in. If prompted, enable two-factor authentication first. Choose Applications, then Register Your Application." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,0,0,10"/>
-                <Button Content="Open Twitch Developer Console" HorizontalAlignment="Left" Background="{DynamicResource ButtonBrush}" Click="OpenTwitchConsole_Click"/>
-                <TextBlock Text="2  Set the OAuth redirect URL" FontSize="16" FontWeight="Bold" Margin="0,20,0,8"/>
-                <TextBlock Text="When registering the app, enter this exact URL under OAuth Redirect URLs:" TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,0,0,8"/>
-                <TextBox x:Name="LoginRedirectText" Text="http://localhost:17563" IsReadOnly="True" IsReadOnlyCaretVisible="True" TextWrapping="Wrap" MinHeight="36"/>
-                <TextBlock Text="Choose the closest application category, complete the verification, and create the application." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,8,0,0"/>
-                <TextBlock Text="3  Copy the Twitch credentials" FontSize="16" FontWeight="Bold" Margin="0,20,0,8"/>
-                <TextBlock Text="Open the new application's Manage page. Copy its Client ID, create a Client Secret, and copy the secret immediately." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}"/>
-                <TextBlock Text="4  Add them to the app's .env file" FontSize="16" FontWeight="Bold" Margin="0,20,0,8"/>
-                <TextBlock Text="Open .env beside StreamlootsGifter.exe and replace the blank values. Do not add quotes or spaces around the equals signs:" TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,0,0,8"/>
-                <TextBox Text="TWITCH_CLIENT_ID=your_client_id&#x0a;TWITCH_CLIENT_SECRET=your_client_secret" IsReadOnly="True" IsReadOnlyCaretVisible="True" TextWrapping="Wrap" MinHeight="58"/>
-                <Button Content="Open .env in Notepad" HorizontalAlignment="Left" Margin="0,9,0,0" Background="{DynamicResource ButtonBrush}" Click="OpenLoginEnv_Click"/>
-                <TextBlock Text="5  Restart and connect" FontSize="16" FontWeight="Bold" Margin="0,20,0,8"/>
-                <TextBlock Text="Save .env, restart Streamloots Gifter, then click Continue with Twitch. Sign in as the streamer and approve the requested access." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}"/>
+                <TextBlock Text="1  Connect your Twitch account" FontSize="16" FontWeight="Bold" Margin="0,0,0,8"/>
+                <TextBlock Text="Click Continue with Twitch on the login screen. The app opens Twitch's official activation page and displays a one-time code." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,0,0,10"/>
+                <Button Content="Open Twitch activation page" HorizontalAlignment="Left" Background="{DynamicResource ButtonBrush}" Click="OpenTwitchActivation_Click"/>
+                <TextBlock Text="2  Approve access on Twitch" FontSize="16" FontWeight="Bold" Margin="0,20,0,8"/>
+                <TextBlock Text="Sign in on twitch.tv if needed, enter the code shown in the app, and approve the requested permissions. The code is copied to your clipboard automatically." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}"/>
+                <TextBlock Text="3  Return to Streamloots Gifter" FontSize="16" FontWeight="Bold" Margin="0,20,0,8"/>
+                <TextBlock Text="The app completes the connection automatically. Your Twitch password is entered only on Twitch; no Client Secret or .env setup is needed." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}"/>
                 <Border Background="{DynamicResource InputBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" CornerRadius="8" Padding="12" Margin="0,18,0,0">
-                  <TextBlock Text="Keep the Client Secret private. Never send the filled .env file or include it in screenshots or public uploads." TextWrapping="Wrap" Foreground="{DynamicResource WarningBrush}"/>
+                  <TextBlock Text="The app stores its rotating Twitch session encrypted for your Windows account. If Twitch access expires or is revoked, connect again." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}"/>
                 </Border>
-                <TextBlock Text="Official guides" FontSize="16" FontWeight="Bold" Margin="0,20,0,8"/>
-                <TextBox Text="https://dev.twitch.tv/docs/authentication/register-app/" IsReadOnly="True" IsReadOnlyCaretVisible="True" TextWrapping="Wrap" MinHeight="36" Margin="0,0,0,6"/>
                 <TextBox Text="https://dev.twitch.tv/docs/authentication/getting-tokens-oauth/" IsReadOnly="True" IsReadOnlyCaretVisible="True" TextWrapping="Wrap" MinHeight="36"/>
               </StackPanel>
             </ScrollViewer>

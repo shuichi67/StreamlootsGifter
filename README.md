@@ -26,13 +26,17 @@ then uncomment and update this line:
 - The current build also retains the optional Free Chest Hour feature.
 - Choose English or Spanish Streamloots labels in Settings; the browser extension recognizes both languages.
 
+## Publishing updates
+
+The in-app updater requires both the GitHub SHA-256 digest and a publisher signature. The release builder uses the ignored local file `.update-signing-private.pem` to sign the update ZIP. Keep that private key backed up securely and never commit or upload it. Upload both `StreamlootsGifter-Update-...zip` and its matching `.zip.sig` file to the same GitHub release. The app has the corresponding public key pinned in its updater and refuses unsigned packages.
+
 ## What you need
 
 - Windows 10 or 11, 64-bit.
 - A Twitch account for the streamer.
 - A Streamloots creator account with access to the relevant collections and gifting controls.
 - Google Chrome (recommended) or other Chromium-based browsers.
-- A Twitch Developer application Client ID and Client Secret.
+- A Twitch account for the streamer to authorize through Twitch’s official sign-in page.
 
 ## First-time setup
 
@@ -43,42 +47,23 @@ then uncomment and update this line:
 3. Extract the ZIP to a folder the streamer can write to, such as `Documents\Streamloots Gifter`.
 4. Keep the extracted folder in place. The app stores its local settings and history alongside the application.
 
-### 2. Create Twitch application credentials
+### 2. Sign in to Twitch
 
-1. Open the [Twitch Developer Console](https://dev.twitch.tv/console/apps) and sign in.
-2. Choose **Applications** and register a new application.
-3. Enter a name, such as `Streamloots Gifter - YourChannel`.
-4. Add this exact OAuth Redirect URL:
-   `http://localhost:17563`
-5. Choose the closest matching category, complete verification, and create the application.
-6. Open the application’s **Manage** page. Copy its **Client ID**, then create and copy a **Client Secret**.
+Start `StreamlootsGifter.exe` and click **Continue with Twitch**. The app opens Twitch’s official activation page and shows a one-time code. Sign in on `twitch.tv` if asked, enter that code, and approve the requested access. Return to the app; it completes the connection automatically. You never enter your Twitch password or a Client Secret into Streamloots Gifter.
 
-### 3. Add credentials to `.env`
+The app saves the Twitch session encrypted for the current Windows account. Refresh tokens rotate when renewed; the app saves each replacement. If Twitch access is revoked or expires after a long period of inactivity, connect again.
 
-In the extracted app folder, open `.env` with Notepad and fill in these values:
-
-```text
-TWITCH_CLIENT_ID=your_client_id
-TWITCH_CLIENT_SECRET=your_client_secret
-```
-
-Do not add quotation marks or spaces around the `=` signs. Save the file, then start `StreamlootsGifter.exe`.
-
-### 4. Sign in to Twitch
-
-Click **Continue with Twitch**, sign in as the streamer, and approve the requested access. The first successful login may offer a short in-app introduction.
-
-### 5. Install the browser extension
+### 3. Install the browser extension
 
 1. In Chrome, open `chrome://extensions`.
 2. Turn on **Developer mode**.
 3. Choose **Load unpacked**.
 4. Select the `streamloots_extension` folder inside the extracted app folder.
-5. Open the Streamloots Gifter extension and connect it to the app using **Get key & connect**. If needed, copy the Bridge key from the app’s Streamloots Bridge widget and enter it manually.
+5. In the app’s Streamloots Bridge widget, choose **Copy key**. Open the extension popup, paste the key, and choose **Connect**.
 
 The extension is loaded locally; it is not installed from the Chrome Web Store.
 
-### 6. Open Streamloots and configure gifts
+### 4. Open Streamloots and configure gifts
 
 - Keep the Streamloots Activity Feed open in the browser while using card automation.
 - In the app, configure the Twitch channel point rewards and Streamloots card names you want to automate.

@@ -90,8 +90,6 @@ public partial class MainWindow : Window
     private readonly HashSet<string> _claimedViewers = new(StringComparer.Ordinal);
     private readonly DispatcherTimer _freeChestTimer = new() { Interval = TimeSpan.FromMilliseconds(500) };
     private readonly DispatcherTimer _bridgeTimer = new() { Interval = TimeSpan.FromSeconds(1) };
-    private readonly string _clientId;
-    private readonly string _clientSecret;
     private string _activePage = "dashboard";
     private string? _activeWindowId;
     private DateTimeOffset? _freeChestUntil;
@@ -140,6 +138,7 @@ public partial class MainWindow : Window
     private IReadOnlyList<string> _activityNameSuggestions = [];
     private ToggleButton? _showHiddenRewards;
     private StackPanel? _historyList;
+    private int _historyVisibleLimit = 200;
     private StackPanel? _activityList;
     private StackPanel? _streamlootsCardRulesList;
     private FrameworkElement? _historyFiltersPanel;
@@ -229,13 +228,10 @@ public partial class MainWindow : Window
             : BuildInitialDashboardLayout(_config.SectionOrder.Where(_config.DashboardSections.Contains).ToArray());
         SyncDashboardSectionsFromLayout();
         ApplyThemePreset(_config.ThemePreset);
-        var env = LoadEnvironment(AppPaths.EnvironmentFile);
-        _clientId = env.GetValueOrDefault("TWITCH_CLIENT_ID", "");
-        _clientSecret = env.GetValueOrDefault("TWITCH_CLIENT_SECRET", "");
         _giftQueue = new LocalGiftQueue(AppPaths.Queue, AppPaths.BridgeKey);
         _giftQueue.StreamlootsCardRuleNamesProvider = () => Dispatcher.Invoke(() => _config.StreamlootsCardRules.Where(rule => rule.Enabled).Select(rule => rule.CardName).ToArray());
         _giftQueue.StreamlootsLanguageProvider = () => Dispatcher.Invoke(() => _config.StreamlootsLanguage);
-        _twitch = new TwitchService(_clientId, _clientSecret);
+        _twitch = new TwitchService();
 
         BuildCards();
         BuildNavigation();
@@ -246,9 +242,16 @@ public partial class MainWindow : Window
         _twitch.StatusChanged += status => Dispatcher.InvokeAsync(() =>
         {
             ConnectionStatus.Text = status;
+            if (LoginScreen.Visibility == Visibility.Visible)
+                LoginStatus.Text = status;
             ConnectionStatus.Foreground = status.Contains("reconnecting", StringComparison.OrdinalIgnoreCase)
                 ? Brush("#E5B94C") : Brush("#35C979");
             UpdateFreeChestCompactControls();
+        });
+        _twitch.DeviceCodeReady += (code, url) => Dispatcher.InvokeAsync(() =>
+        {
+            LoginStatus.Text = $"Enter code {code} at {url}";
+            try { Clipboard.SetText(code); } catch (System.Runtime.InteropServices.ExternalException) { }
         });
         _twitch.ChatReadyChanged += ready => Dispatcher.InvokeAsync(() =>
         {
@@ -456,39 +459,20 @@ public partial class MainWindow : Window
         collapse.Start();
     }
 
-    private void OpenTwitchConsole_Click(object sender, RoutedEventArgs e)
+    private void OpenTwitchActivation_Click(object sender, RoutedEventArgs e)
     {
-        Process.Start(new ProcessStartInfo("https://dev.twitch.tv/console/apps") { UseShellExecute = true });
-    }
-
-    private void OpenLoginEnv_Click(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            if (!File.Exists(AppPaths.EnvironmentFile))
-                File.WriteAllText(AppPaths.EnvironmentFile, "TWITCH_CLIENT_ID=\r\nTWITCH_CLIENT_SECRET=\r\n", new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-            var notepad = new ProcessStartInfo("notepad.exe") { UseShellExecute = false };
-            notepad.ArgumentList.Add(AppPaths.EnvironmentFile);
-            Process.Start(notepad);
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, $"Could not open the .env file:\n{ex.Message}\n\nFile path: {AppPaths.EnvironmentFile}", "Twitch login setup", MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
+        Process.Start(new ProcessStartInfo("https://www.twitch.tv/activate") { UseShellExecute = true });
     }
 
     private void CopyLoginGuide_Click(object sender, RoutedEventArgs e)
     {
-        const string guide = "STREAMLOOTS GIFTER — TWITCH LOGIN SETUP\r\n\r\n" +
-            "1. Open https://dev.twitch.tv/console/apps and sign in. Enable two-factor authentication if Twitch asks.\r\n" +
-            "2. Choose Applications > Register Your Application. Enter a name, such as Streamloots Gifter - YourChannel.\r\n" +
-            "3. Add this exact OAuth Redirect URL: http://localhost:17563\r\n" +
-            "4. Choose the closest application category, complete verification, and create the app. Open Manage, copy the Client ID, then create and copy a Client Secret.\r\n" +
-            "5. Open the .env file beside StreamlootsGifter.exe and enter these lines without quotes or spaces around the equals signs:\r\n" +
-            "TWITCH_CLIENT_ID=your_client_id\r\nTWITCH_CLIENT_SECRET=your_client_secret\r\n" +
-            "6. Save .env, restart Streamloots Gifter, click Continue with Twitch, sign in as the streamer, and approve access.\r\n\r\n" +
-            "Official guides:\r\nhttps://dev.twitch.tv/docs/authentication/register-app/\r\nhttps://dev.twitch.tv/docs/authentication/getting-tokens-oauth/\r\n\r\n" +
-            "Keep the Client Secret private. Never share the filled .env file or include it in screenshots or public uploads.";
+        const string guide = "STREAMLOOTS GIFTER — TWITCH LOGIN\r\n\r\n" +
+            "1. Click Continue with Twitch in Streamloots Gifter.\r\n" +
+            "2. Twitch opens its official activation page. A sign-in code is copied to your clipboard and shown in the app.\r\n" +
+            "3. Sign in on twitch.tv if needed, enter the code, and approve access.\r\n" +
+            "4. Return to Streamloots Gifter. The connection finishes automatically.\r\n\r\n" +
+            "Your Twitch password is entered only on Twitch. The app stores its rotating session encrypted for your Windows account.\r\n\r\n" +
+            "Official guide: https://dev.twitch.tv/docs/authentication/getting-tokens-oauth/";
         try
         {
             Clipboard.SetText(guide);
@@ -499,7 +483,6 @@ public partial class MainWindow : Window
             MessageBox.Show(this, $"Could not copy the setup instructions:\n{ex.Message}", "Twitch login setup", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
-
     private async void Logout_Click(object sender, RoutedEventArgs e)
     {
         await _twitch.LogoutAsync();
@@ -744,7 +727,7 @@ public partial class MainWindow : Window
             case "bridge":
                 if (_config.CollapsedSections.Contains("bridge")) ToggleCollapse("bridge");
                 _widgetGuideSteps.Add(new(Target(_bridgeStatus)!, "Extension connection", "This status shows whether the browser extension is connected to the app. Keep the Streamloots Activity Feed open while using card automation."));
-                _widgetGuideSteps.Add(new(Target(_bridgeKeyBox)!, "Bridge key", "The key links this app to the browser extension. Copy it in the extension setup, or use Show to inspect it here."));
+                _widgetGuideSteps.Add(new(Target(_bridgeKeyBox)!, "Bridge key", "The key links this app to the browser extension. Copy it here, then paste it into the extension popup."));
                 _widgetGuideSteps.Add(new([Target(_bridgeCopyButton)!, Target(_bridgeRevealButton)!], "Copy and reveal", "Copy key copies the current key to your clipboard. Show reveals or hides the key in this panel."));
                 _widgetGuideSteps.Add(new(Target(_bridgeGenerateButton)!, "Generate new key", "Generate a replacement only if needed. The extension will disconnect until it reconnects with the new key."));
                 break;
@@ -1955,7 +1938,7 @@ public partial class MainWindow : Window
 
         var body = new StackPanel { Margin = new Thickness(20, 18, 20, 12) };
         body.Children.Add(new TextBlock { Text = $"Streamloots Gifter {release.Version} is ready to install.", FontSize = 15, FontWeight = FontWeights.SemiBold, Foreground = Brush("#F4F6FF"), TextWrapping = TextWrapping.Wrap });
-        body.Children.Add(new TextBlock { Text = "Your Twitch credentials, settings, claim history, gift queue, and Bridge key are preserved.", Margin = new Thickness(0, 8, 0, 12), Foreground = Brush("#A6B2C8"), TextWrapping = TextWrapping.Wrap });
+        body.Children.Add(new TextBlock { Text = "Your encrypted Twitch session, settings, claim history, gift queue, and Bridge key are preserved.", Margin = new Thickness(0, 8, 0, 12), Foreground = Brush("#A6B2C8"), TextWrapping = TextWrapping.Wrap });
         if (!string.IsNullOrWhiteSpace(release.Notes))
         {
             body.Children.Add(new TextBlock { Text = "Release notes", FontWeight = FontWeights.Bold, Foreground = Brush("#F4F6FF"), Margin = new Thickness(0, 0, 0, 6) });
@@ -2789,7 +2772,7 @@ public partial class MainWindow : Window
     private void RegenerateBridgeKey()
     {
         var confirm = MessageBox.Show(this,
-            "Generate a new Bridge key? The extension will disconnect until you press “Get key & connect” in its popup.",
+            "Generate a new Bridge key? The extension will disconnect until you copy the new key from the app and connect again.",
             "Generate new Bridge key", MessageBoxButton.YesNo, MessageBoxImage.Warning);
         if (confirm != MessageBoxResult.Yes) return;
         _giftQueue.RotateToken();
@@ -2955,7 +2938,7 @@ public partial class MainWindow : Window
         panel.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         var filters = new WrapPanel { Margin = new Thickness(0, 0, 0, 8), HorizontalAlignment = HorizontalAlignment.Stretch };
         _historyFiltersPanel = filters;
-        _historyUserFilter = CreateUsernameTextFilter(_config.ClaimHistoryUserFilter, 120, () => _historyNameSuggestions, RenderHistory, value => { _config.ClaimHistoryUserFilter = value; SaveConfig(); });
+        _historyUserFilter = CreateUsernameTextFilter(_config.ClaimHistoryUserFilter, 120, () => _historyNameSuggestions, () => { _historyVisibleLimit = 200; RenderHistory(); }, value => { _config.ClaimHistoryUserFilter = value; SaveConfig(); });
         _historyUsernameField = CreateResponsiveField("Username", _historyUserFilter, 120);
         _historySourceFilter = new ComboBox { ItemsSource = ConfigStore.GiftSourceFilters, Width = 131, SelectedItem = _config.ClaimHistorySourceFilter, VerticalContentAlignment = VerticalAlignment.Center };
         _historySourceFilter.SelectionChanged += (_, _) =>
@@ -2964,6 +2947,7 @@ public partial class MainWindow : Window
             {
                 _config.ClaimHistorySourceFilter = source;
                 SaveConfig();
+                _historyVisibleLimit = 200;
                 RenderHistory();
             }
         };
@@ -2977,6 +2961,7 @@ public partial class MainWindow : Window
             {
                 _config.HistoryFilter = value;
                 SaveConfig();
+                _historyVisibleLimit = 200;
                 RenderHistory();
             }
         };
@@ -4436,7 +4421,7 @@ public partial class MainWindow : Window
             Status = status == "pending" ? "Gift queued for Streamloots" : $"Gift not queued: {detail}",
             Detail = detail
         };
-        activity.JobId = _giftQueue.History().FirstOrDefault(job => job.RedemptionId == request.RedemptionId)?.JobId ?? "";
+        activity.JobId = _giftQueue.FindByRedemptionId(request.RedemptionId)?.JobId ?? "";
         _activityById[request.RedemptionId] = activity;
         _activity.Insert(0, activity);
         if (_activity.Count > 200)
@@ -4480,7 +4465,6 @@ public partial class MainWindow : Window
         var selected = _historyFilter?.SelectedItem as string ?? _config.HistoryFilter;
         var sourceFilter = _historySourceFilter?.SelectedItem as string ?? _config.ClaimHistorySourceFilter;
         var username = (_historyUserFilter?.Text ?? _config.ClaimHistoryUserFilter).Trim();
-        var jobs = _giftQueue.History();
         var statuses = selected switch
         {
             "Gifted" => new[] { "sent" },
@@ -4490,11 +4474,13 @@ public partial class MainWindow : Window
             "Sending" => new[] { "processing" },
             _ => Array.Empty<string>()
         };
-        if (statuses.Length > 0) jobs = jobs.Where(j => statuses.Contains(j.Status)).ToArray();
-        if (sourceFilter != "All") jobs = jobs.Where(j => j.Source == SourceCode(sourceFilter)).ToArray();
-        if (username.Length > 0)
-            jobs = jobs.Where(j => j.Viewer.Contains(username, StringComparison.OrdinalIgnoreCase) || j.Recipient.Contains(username, StringComparison.OrdinalIgnoreCase)).ToArray();
-        if (jobs.Count == 0)
+        var page = _giftQueue.HistoryPage(
+            sourceFilter == "All" ? null : SourceCode(sourceFilter),
+            statuses,
+            username,
+            0,
+            _historyVisibleLimit);
+        if (page.Jobs.Count == 0)
         {
             var empty = Label("No claims match this filter yet.", false, "#8491AA");
             empty.HorizontalAlignment = HorizontalAlignment.Left;
@@ -4502,7 +4488,7 @@ public partial class MainWindow : Window
             _historyFirstRow = empty;
             return;
         }
-        foreach (var job in jobs)
+        foreach (var job in page.Jobs)
         {
             var content = new StackPanel();
             var row = new Border { Background = Brush("#10182A"), BorderBrush = Brush("#26324A"), BorderThickness = new Thickness(0, 0, 0, 1), CornerRadius = new CornerRadius(7), Padding = new Thickness(9, 6, 9, 6), Margin = new Thickness(0, 4, 0, 4), Child = content };
@@ -4545,6 +4531,17 @@ public partial class MainWindow : Window
             content.Children.Add(footer);
             _historyList.Children.Add(row);
             _historyFirstRow ??= row;
+        }
+        if (page.HasMore)
+        {
+            var more = MakeButton("Show more claims", () =>
+            {
+                if (_historyVisibleLimit <= int.MaxValue - 200) _historyVisibleLimit += 200;
+                RenderHistory();
+            }, "#202B40");
+            more.HorizontalAlignment = HorizontalAlignment.Center;
+            more.Margin = new Thickness(0, 8, 0, 10);
+            _historyList.Children.Add(more);
         }
     }
 
@@ -4668,7 +4665,7 @@ public partial class MainWindow : Window
         var buttons = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Right };
         var clearButton = MakeButton("Clear entire history", () =>
         {
-            var count = _giftQueue.History().Count;
+            var count = _giftQueue.HistoryCount;
             if (count == 0)
             {
                 footerStatus.Text = "Claim history is already empty.";
@@ -4695,18 +4692,14 @@ public partial class MainWindow : Window
             var sourceCode = sourceFilter == "All" ? null : SourceCode(sourceFilter);
             var statusCode = CleanupHistoryStatusCode(statusFilter);
             var cutoff = CleanupHistoryCutoff(ageFilter);
-            var matches = _giftQueue.History().Where(job =>
-                (usernameFilter.Length == 0 || job.Viewer.Contains(usernameFilter, StringComparison.OrdinalIgnoreCase) || job.Recipient.Contains(usernameFilter, StringComparison.OrdinalIgnoreCase)) &&
-                (sourceCode is null || job.Source == sourceCode) &&
-                (statusCode is null || job.Status == statusCode) &&
-                (cutoff is null || (DateTimeOffset.TryParse(job.CreatedAt, out var created) && created < cutoff.Value))).ToArray();
-            if (matches.Length == 0)
+            var matchCount = _giftQueue.CountMatchingHistory(usernameFilter, sourceCode, statusCode, cutoff);
+            if (matchCount == 0)
             {
                 footerStatus.Text = "No claim entries match those filters.";
                 return;
             }
             if (!ShowDashboardConfirmation(cleanupWindow, "Delete matching claims",
-                    $"Permanently delete these {matches.Length} claim record(s)? Matching queued or sending gifts will be discarded. This cannot be undone.",
+                    $"Permanently delete these {matchCount} claim record(s)? Matching queued or sending gifts will be discarded. This cannot be undone.",
                     "Delete claims")) return;
             var removed = _giftQueue.DeleteHistory(usernameFilter, sourceCode, statusCode, cutoff);
             RenderHistory();
@@ -4823,12 +4816,7 @@ public partial class MainWindow : Window
 
     private void RefreshHistoryNameSuggestions()
     {
-        _historyNameSuggestions = _giftQueue.History()
-            .SelectMany(job => new[] { job.Viewer, job.Recipient })
-            .Where(name => !string.IsNullOrWhiteSpace(name))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        _historyNameSuggestions = _giftQueue.HistoryNames();
     }
 
     private void RefreshActivityNameSuggestions()
@@ -5073,7 +5061,7 @@ public partial class MainWindow : Window
 
     private void RetryActivityGift(GiftActivity item)
     {
-        var job = _giftQueue.History().FirstOrDefault(candidate => candidate.JobId == item.JobId);
+        var job = _giftQueue.FindByJobId(item.JobId);
         if (job is null)
         {
             MessageBox.Show(this, "This queued gift is no longer available to retry.", "Retry gift", MessageBoxButton.OK, MessageBoxImage.Information);

@@ -27,12 +27,11 @@
       button { width: 100%; margin-top: 7px; padding: 9px 11px; border: 1px solid transparent; border-radius: 8px; background: #25324a; color: #f4f6ff; font: inherit; font-weight: 600; cursor: pointer; transition: background .15s, transform .15s, opacity .15s; }
       button:hover:not(:disabled) { filter: brightness(1.12); transform: translateY(-1px); }
       button:disabled { opacity: .42; cursor: default; }
-      #connect { background: #5d6eff; }
+      #connect-manual { background: #5d6eff; }
       .manual { margin-top: 13px; padding-top: 12px; border-top: 1px solid #26324a; }
       .manual label { display: block; margin: 0 1px 5px; color: #9aa7c0; font-size: 11px; font-weight: 600; }
       .manual input { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid #26324a; border-radius: 7px; outline: none; background: #0e1525; color: #f4f6ff; font: inherit; }
       .manual input:focus { border-color: #5d6eff; }
-      #connect-manual { background: #25324a; }
       #disconnect { background: #202b40; }
       #rotate { margin-top: 12px; background: #392833; color: #ffaaaa; }
       .hint { margin: 12px 2px 0; color: #71809c; font-size: 10px; line-height: 1.45; }
@@ -55,17 +54,16 @@
           <div id="status-detail">Checking the local app and saved key.</div>
         </div>
       </div>
-      <button id="connect">Get key &amp; connect</button>
       <div class="manual">
-        <label for="manual-key">Bridge key</label>
+        <label for="manual-key">Bridge key copied from the app</label>
         <input id="manual-key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste key copied from the app">
-        <button id="connect-manual">Connect with key</button>
+        <button id="connect-manual">Connect</button>
       </div>
       <button id="disconnect" disabled>Disconnect</button>
       <button id="rotate" disabled>Generate new key</button>
       <div id="toast" aria-live="polite"></div>
     </main>
-    <p class="hint">Keep the Streamloots Activity Feed open to detect card redeems, and a creator page open to process gifts. Disconnect removes the saved key from this browser.</p>
+    <p class="hint">Copy the Bridge key in the app, paste it here, and connect. Keep the Streamloots Activity Feed open to detect card redeems and a creator page open to process gifts. Disconnect removes the saved key from this browser.</p>
     <script src="popup.js"></script>
   </body>
 </html>

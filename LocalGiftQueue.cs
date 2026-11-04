@@ -12,8 +12,14 @@ public sealed class LocalGiftQueue : IAsyncDisposable
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
     private readonly object _gate = new();
     private readonly string _queuePath;
+    private readonly string _journalPath;
     private readonly string _keyPath;
     private readonly List<QueueJob> _jobs;
+    private readonly Dictionary<string, QueueJob> _jobsById = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, QueueJob> _jobsByRedemptionId = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _historyNameSet = new(StringComparer.OrdinalIgnoreCase);
+    private string[] _historyNames = Array.Empty<string>();
+    private readonly SemaphoreSlim _clientSlots = new(16, 16);
     private readonly CancellationTokenSource _stop = new();
     private readonly Timer _pendingTimeoutTimer;
     private DateTimeOffset? _lastExtensionActivity;
@@ -34,9 +40,18 @@ public sealed class LocalGiftQueue : IAsyncDisposable
     public LocalGiftQueue(string queuePath, string keyPath)
     {
         _queuePath = queuePath;
+        _journalPath = queuePath + ".journal";
         _keyPath = keyPath;
         _token = LoadOrCreateToken();
         _jobs = LoadJobs();
+        foreach (var job in _jobs)
+        {
+            if (!string.IsNullOrWhiteSpace(job.JobId)) _jobsById[job.JobId] = job;
+            if (!string.IsNullOrWhiteSpace(job.RedemptionId)) _jobsByRedemptionId[job.RedemptionId] = job;
+            AddHistoryNameLocked(job.Viewer);
+            AddHistoryNameLocked(job.Recipient);
+        }
+        SortHistoryNamesLocked();
         var changed = false;
         foreach (var job in _jobs.Where(j => j.Status == "processing"))
         {
@@ -44,7 +59,7 @@ public sealed class LocalGiftQueue : IAsyncDisposable
             job.Detail = "The app stopped during this gift. Verify Streamloots before retrying.";
             changed = true;
         }
-        if (changed) SaveLocked();
+        if (changed || File.Exists(_journalPath)) SaveLocked();
         _pendingTimeoutTimer = new Timer(_ => ExpireStalePending(), null, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10));
         ExpireStalePending();
     }
@@ -82,8 +97,10 @@ public sealed class LocalGiftQueue : IAsyncDisposable
         QueueJob job;
         lock (_gate)
         {
-            var existing = _jobs.FirstOrDefault(j => j.RedemptionId == request.RedemptionId);
-            if (existing is not null) return (existing.Status, "This redemption was already queued.");
+            if (_jobsByRedemptionId.TryGetValue(request.RedemptionId, out var existing))
+            {
+                return (existing.Status, "This redemption was already queued.");
+            }
             job = new QueueJob
             {
                 JobId = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant(),
@@ -100,7 +117,11 @@ public sealed class LocalGiftQueue : IAsyncDisposable
                 PlayedAt = request.PlayedAt
             };
             _jobs.Add(job);
-            SaveLocked();
+            _jobsById[job.JobId] = job;
+            _jobsByRedemptionId[job.RedemptionId] = job;
+            var namesChanged = AddHistoryNameLocked(job.Viewer) | AddHistoryNameLocked(job.Recipient);
+            if (namesChanged) SortHistoryNamesLocked();
+            SaveJobLocked(job);
         }
         GiftUpdated?.Invoke(job);
         return ("pending", "Queued for Streamloots.");
@@ -110,8 +131,60 @@ public sealed class LocalGiftQueue : IAsyncDisposable
     {
         lock (_gate)
             return _jobs.Where(j => source is null || j.Source == source)
-                .OrderByDescending(j => j.CreatedAt, StringComparer.Ordinal)
+                .Reverse()
                 .Select(Clone).ToArray();
+    }
+
+    public int HistoryCount { get { lock (_gate) return _jobs.Count; } }
+
+    public QueueJob? FindByRedemptionId(string redemptionId)
+    {
+        lock (_gate) return _jobsByRedemptionId.TryGetValue(redemptionId, out var job) ? Clone(job) : null;
+    }
+
+    public QueueJob? FindByJobId(string jobId)
+    {
+        lock (_gate) return _jobsById.TryGetValue(jobId, out var job) ? Clone(job) : null;
+    }
+
+    public string[] HistoryNames()
+    {
+        lock (_gate) return _historyNames;
+    }
+
+    public int CountMatchingHistory(string? username = null, string? source = null, string? status = null, DateTimeOffset? olderThan = null)
+    {
+        lock (_gate)
+            return _jobs.Count(job =>
+                (string.IsNullOrWhiteSpace(username) ||
+                    job.Viewer.Contains(username, StringComparison.OrdinalIgnoreCase) ||
+                    job.Recipient.Contains(username, StringComparison.OrdinalIgnoreCase)) &&
+                (string.IsNullOrWhiteSpace(source) || job.Source == source) &&
+                (string.IsNullOrWhiteSpace(status) || job.Status == status) &&
+                (olderThan is null || (DateTimeOffset.TryParse(job.CreatedAt, out var createdAt) && createdAt < olderThan.Value)));
+    }
+
+    public (IReadOnlyList<QueueJob> Jobs, bool HasMore) HistoryPage(string? source, IReadOnlyCollection<string>? statuses, string username, int skip, int take)
+    {
+        lock (_gate)
+        {
+            var pageSize = Math.Clamp(take, 1, 500);
+            var page = new List<QueueJob>(pageSize);
+            var skipped = 0;
+            for (var index = _jobs.Count - 1; index >= 0; index--)
+            {
+                var job = _jobs[index];
+                if (!string.IsNullOrWhiteSpace(source) && job.Source != source) continue;
+                if (statuses is { Count: > 0 } && !statuses.Contains(job.Status)) continue;
+                if (!string.IsNullOrWhiteSpace(username) &&
+                    !job.Viewer.Contains(username, StringComparison.OrdinalIgnoreCase) &&
+                    !job.Recipient.Contains(username, StringComparison.OrdinalIgnoreCase)) continue;
+                if (skipped++ < Math.Max(0, skip)) continue;
+                if (page.Count == pageSize) return (page, true);
+                page.Add(Clone(job));
+            }
+            return (page, false);
+        }
     }
 
     public int DeleteHistory(string? username = null, string? source = null, string? status = null, DateTimeOffset? olderThan = null)
@@ -125,7 +198,18 @@ public sealed class LocalGiftQueue : IAsyncDisposable
                 (string.IsNullOrWhiteSpace(source) || job.Source == source) &&
                 (string.IsNullOrWhiteSpace(status) || job.Status == status) &&
                 (olderThan is null || (DateTimeOffset.TryParse(job.CreatedAt, out var createdAt) && createdAt < olderThan.Value)));
-            if (removed > 0) SaveLocked();
+            if (removed > 0)
+            {
+                _jobsById.Clear();
+                _jobsByRedemptionId.Clear();
+                foreach (var job in _jobs)
+                {
+                    if (!string.IsNullOrWhiteSpace(job.JobId)) _jobsById[job.JobId] = job;
+                    if (!string.IsNullOrWhiteSpace(job.RedemptionId)) _jobsByRedemptionId[job.RedemptionId] = job;
+                }
+                RebuildHistoryNamesLocked();
+                SaveLocked();
+            }
             return removed;
         }
     }
@@ -139,7 +223,7 @@ public sealed class LocalGiftQueue : IAsyncDisposable
             var job = _jobs.FirstOrDefault(j => j.Status == "pending");
             if (job is null) return null;
             job.Status = "processing";
-            SaveLocked();
+            SaveJobLocked(job);
             claimed = Clone(job);
         }
         GiftUpdated?.Invoke(claimed);
@@ -161,7 +245,7 @@ public sealed class LocalGiftQueue : IAsyncDisposable
                 job.UpdatedAt = now.ToString("O");
                 expired.Add(Clone(job));
             }
-            if (expired.Count > 0) SaveLocked();
+            foreach (var job in expired) SaveJobLocked(job);
         }
         foreach (var job in expired) GiftUpdated?.Invoke(job);
     }
@@ -171,7 +255,8 @@ public sealed class LocalGiftQueue : IAsyncDisposable
         QueueJob? updated;
         lock (_gate)
         {
-            var job = _jobs.FirstOrDefault(j => j.JobId == jobId && j.Status == "processing");
+            var job = _jobsById.GetValueOrDefault(jobId);
+            if (job?.Status != "processing") job = null;
             if (job is null) return null;
             job.Status = result switch
             {
@@ -181,7 +266,7 @@ public sealed class LocalGiftQueue : IAsyncDisposable
             };
             job.Detail = detail.Length > 500 ? detail[..500] : detail;
             job.UpdatedAt = DateTimeOffset.Now.ToString("O");
-            SaveLocked();
+            SaveJobLocked(job);
             updated = Clone(job);
         }
         GiftUpdated?.Invoke(updated);
@@ -193,7 +278,8 @@ public sealed class LocalGiftQueue : IAsyncDisposable
         QueueJob? updated;
         lock (_gate)
         {
-            var job = _jobs.FirstOrDefault(j => j.JobId == jobId && j.Status == "needs_attention");
+            var job = _jobsById.GetValueOrDefault(jobId);
+            if (job?.Status != "needs_attention") job = null;
             if (job is null) return null;
             var previousDetail = job.Detail.Trim();
             job.Status = "pending";
@@ -202,7 +288,7 @@ public sealed class LocalGiftQueue : IAsyncDisposable
                 : $"Manual retry queued. Previous issue: {previousDetail}";
             if (job.Detail.Length > 500) job.Detail = job.Detail[..500];
             job.UpdatedAt = DateTimeOffset.Now.ToString("O");
-            SaveLocked();
+            SaveJobLocked(job);
             updated = Clone(job);
         }
         GiftUpdated?.Invoke(updated);
@@ -214,12 +300,13 @@ public sealed class LocalGiftQueue : IAsyncDisposable
         QueueJob? updated;
         lock (_gate)
         {
-            var job = _jobs.FirstOrDefault(j => j.JobId == jobId && j.Status == "needs_attention");
+            var job = _jobsById.GetValueOrDefault(jobId);
+            if (job?.Status != "needs_attention") job = null;
             if (job is null) return null;
             job.Status = "sent";
             job.Detail = "Marked as gifted after verifying the Streamloots result.";
             job.UpdatedAt = DateTimeOffset.Now.ToString("O");
-            SaveLocked();
+            SaveJobLocked(job);
             updated = Clone(job);
         }
         GiftUpdated?.Invoke(updated);
@@ -235,6 +322,11 @@ public sealed class LocalGiftQueue : IAsyncDisposable
             catch (OperationCanceledException) { break; }
             catch (ObjectDisposedException) { break; }
             catch (SocketException) when (cancellationToken.IsCancellationRequested) { break; }
+            if (!_clientSlots.Wait(0))
+            {
+                client.Dispose();
+                continue;
+            }
             _ = HandleClientSafeAsync(client, cancellationToken);
         }
     }
@@ -243,8 +335,11 @@ public sealed class LocalGiftQueue : IAsyncDisposable
     {
         using (client)
         {
-            try { await HandleClientAsync(client, cancellationToken).ConfigureAwait(false); }
+            using var requestTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            requestTimeout.CancelAfter(TimeSpan.FromSeconds(10));
+            try { await HandleClientAsync(client, requestTimeout.Token).ConfigureAwait(false); }
             catch (Exception ex) when (ex is IOException or SocketException or JsonException or OperationCanceledException) { }
+            finally { _clientSlots.Release(); }
         }
     }
 
@@ -280,12 +375,6 @@ public sealed class LocalGiftQueue : IAsyncDisposable
         {
             if (extensionOrigin is null) { await WriteResponseAsync(stream, 403, "Forbidden", cancellationToken); return; }
             await WriteResponseAsync(stream, 204, "", cancellationToken, corsOrigin: extensionOrigin);
-            return;
-        }
-        if (method == "GET" && path == "/pair")
-        {
-            if (extensionOrigin is null) { await WriteJsonAsync(stream, 403, new { error = "Pairing is only available to the browser extension." }, cancellationToken); return; }
-            await WriteJsonAsync(stream, 200, new { token = Token }, cancellationToken, extensionOrigin);
             return;
         }
         if (method == "GET" && path == "/health")
@@ -423,22 +512,109 @@ public sealed class LocalGiftQueue : IAsyncDisposable
 
     private List<QueueJob> LoadJobs()
     {
+        List<QueueJob> jobs = [];
         try
         {
-            if (!File.Exists(_queuePath)) return [];
-            return JsonSerializer.Deserialize<List<QueueJob>>(File.ReadAllText(_queuePath), JsonOptions) ?? [];
+            if (File.Exists(_queuePath))
+                jobs = JsonSerializer.Deserialize<List<QueueJob>>(File.ReadAllText(_queuePath), JsonOptions) ?? [];
         }
         catch (Exception ex) when (ex is IOException or JsonException) { return []; }
+        if (!File.Exists(_journalPath)) return jobs;
+
+        var byId = new Dictionary<string, int>(StringComparer.Ordinal);
+        var byRedemption = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (var index = 0; index < jobs.Count; index++)
+        {
+            if (!string.IsNullOrWhiteSpace(jobs[index].JobId)) byId[jobs[index].JobId] = index;
+            if (!string.IsNullOrWhiteSpace(jobs[index].RedemptionId)) byRedemption[jobs[index].RedemptionId] = index;
+        }
+        try
+        {
+            foreach (var line in File.ReadLines(_journalPath))
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                QueueJob? job;
+                try { job = JsonSerializer.Deserialize<QueueJob>(line, JsonOptions); }
+                catch (JsonException) { continue; } // Ignore a truncated final journal record.
+                if (job is null) continue;
+                if (!string.IsNullOrWhiteSpace(job.JobId) && byId.TryGetValue(job.JobId, out var index)) jobs[index] = job;
+                else if (!string.IsNullOrWhiteSpace(job.RedemptionId) && byRedemption.TryGetValue(job.RedemptionId, out index)) jobs[index] = job;
+                else
+                {
+                    var newIndex = jobs.Count;
+                    jobs.Add(job);
+                    if (!string.IsNullOrWhiteSpace(job.JobId)) byId[job.JobId] = newIndex;
+                    if (!string.IsNullOrWhiteSpace(job.RedemptionId)) byRedemption[job.RedemptionId] = newIndex;
+                }
+            }
+        }
+        catch (IOException) { }
+        return jobs;
     }
 
     private void SaveLocked()
     {
         var temporaryPath = _queuePath + ".tmp";
-        File.WriteAllText(temporaryPath, JsonSerializer.Serialize(_jobs, new JsonSerializerOptions { WriteIndented = true }));
+        File.WriteAllText(temporaryPath, JsonSerializer.Serialize(_jobs));
         File.Move(temporaryPath, _queuePath, true);
+        if (File.Exists(_journalPath)) File.Delete(_journalPath);
     }
 
-    private static QueueJob Clone(QueueJob job) => JsonSerializer.Deserialize<QueueJob>(JsonSerializer.Serialize(job))!;
+    private bool AddHistoryNameLocked(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return false;
+        return _historyNameSet.Add(name);
+    }
+
+    private void SortHistoryNamesLocked() => _historyNames = _historyNameSet
+        .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+
+    private void RebuildHistoryNamesLocked()
+    {
+        _historyNameSet.Clear();
+        foreach (var job in _jobs)
+        {
+            AddHistoryNameLocked(job.Viewer);
+            AddHistoryNameLocked(job.Recipient);
+        }
+        SortHistoryNamesLocked();
+    }
+
+    private void SaveJobLocked(QueueJob job)
+    {
+        var json = JsonSerializer.Serialize(job);
+        bool shouldCompact;
+        using (var stream = new FileStream(_journalPath, FileMode.Append, FileAccess.Write, FileShare.Read, 4096, FileOptions.WriteThrough))
+        {
+            using (var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false), 1024, leaveOpen: true))
+            {
+                writer.WriteLine(json);
+                writer.Flush();
+            }
+            stream.Flush(flushToDisk: true);
+            shouldCompact = stream.Length >= 8L * 1024 * 1024;
+        }
+        if (shouldCompact) SaveLocked();
+    }
+
+    private static QueueJob Clone(QueueJob job) => new()
+    {
+        JobId = job.JobId,
+        RedemptionId = job.RedemptionId,
+        Recipient = job.Recipient,
+        Viewer = job.Viewer,
+        Source = job.Source,
+        Keyword = job.Keyword,
+        Collection = job.Collection,
+        Packs = job.Packs,
+        Cards = job.Cards,
+        Status = job.Status,
+        Detail = job.Detail,
+        CreatedAt = job.CreatedAt,
+        UpdatedAt = job.UpdatedAt,
+        PlayedAt = job.PlayedAt
+    };
 
     public async ValueTask DisposeAsync()
     {

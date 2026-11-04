@@ -10,13 +10,15 @@ namespace StreamlootsManager;
 
 public sealed class TwitchService : IAsyncDisposable
 {
-    private const string RedirectUri = "http://localhost:17563";
+    // Twitch Client IDs are public identifiers. Set this to the Client ID for
+    // the Streamloots Gifter application before producing a public release.
+    public const string PublicClientId = "nfdfwb5pd969whjuhgj0p1fu858c93";
     private const string ApiRoot = "https://api.twitch.tv/helix/";
+    private const string OAuthRoot = "https://id.twitch.tv/oauth2/";
     private const string EventSubUrl = "wss://eventsub.wss.twitch.tv/ws";
     private static readonly string[] Scopes = ["channel:read:redemptions", "user:read:chat"];
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(20) };
     private readonly string _clientId;
-    private readonly string _clientSecret;
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
     private CancellationTokenSource? _eventSubStop;
     private Task? _eventSubTask;
@@ -32,74 +34,141 @@ public sealed class TwitchService : IAsyncDisposable
     public TwitchUser? User { get; private set; }
     public bool IsChatReady { get; private set; }
     public event Action<string>? StatusChanged;
+    public event Action<string, string>? DeviceCodeReady;
     public event Action<bool>? ChatReadyChanged;
     public event Action<RedemptionEvent>? RedemptionReceived;
     public event Action<ChatMessageEvent>? ChatMessageReceived;
 
-    public TwitchService(string clientId, string clientSecret)
+    public TwitchService(string? clientId = null)
     {
-        _clientId = clientId;
-        _clientSecret = clientSecret;
+        _clientId = string.IsNullOrWhiteSpace(clientId) ? PublicClientId : clientId.Trim();
+        if (TwitchTokenStore.Load() is { } saved)
+        {
+            _accessToken = saved.AccessToken;
+            _refreshToken = saved.RefreshToken;
+            _tokenExpiresAt = saved.ExpiresAt;
+        }
     }
 
     public async Task<TwitchUser> LoginAsync(CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(_clientId) || string.IsNullOrWhiteSpace(_clientSecret))
-            throw new InvalidOperationException("TWITCH_CLIENT_ID or TWITCH_CLIENT_SECRET is missing from .env.");
+        if (string.IsNullOrWhiteSpace(_clientId) || _clientId.StartsWith("SET_", StringComparison.Ordinal))
+            throw new InvalidOperationException("The app's Twitch Client ID has not been configured by its publisher.");
 
-        using var listener = new HttpListener();
-        listener.Prefixes.Add(RedirectUri + "/");
-        listener.Start();
-        var state = Guid.NewGuid().ToString("N");
-        var query = new Dictionary<string, string>
+        if (!string.IsNullOrWhiteSpace(_refreshToken))
+        {
+            try
+            {
+                await RefreshTokenAsync(cancellationToken).ConfigureAwait(false);
+                await ValidateTokenAsync(cancellationToken).ConfigureAwait(false);
+                User = await GetCurrentUserAsync(cancellationToken).ConfigureAwait(false);
+                StatusChanged?.Invoke($"Connected to {User.DisplayName}");
+                return User;
+            }
+            catch (TwitchAuthorizationExpiredException)
+            {
+                ClearTokens();
+            }
+        }
+
+        await AuthorizeWithDeviceCodeAsync(cancellationToken).ConfigureAwait(false);
+        await ValidateTokenAsync(cancellationToken).ConfigureAwait(false);
+        User = await GetCurrentUserAsync(cancellationToken).ConfigureAwait(false);
+        StatusChanged?.Invoke($"Connected to {User.DisplayName}");
+        return User;
+    }
+
+    private async Task AuthorizeWithDeviceCodeAsync(CancellationToken cancellationToken)
+    {
+        StatusChanged?.Invoke("Requesting a Twitch sign-in code…");
+        using var startResponse = await _http.PostAsync(OAuthRoot + "device", new FormUrlEncodedContent(new Dictionary<string, string>
         {
             ["client_id"] = _clientId,
-            ["redirect_uri"] = RedirectUri,
-            ["response_type"] = "code",
-            ["scope"] = string.Join(' ', Scopes),
-            ["state"] = state
-        };
-        var authorizeUrl = "https://id.twitch.tv/oauth2/authorize?" + string.Join("&", query.Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
-        Process.Start(new ProcessStartInfo(authorizeUrl) { UseShellExecute = true });
-        StatusChanged?.Invoke("Waiting for Twitch authorization…");
-
-        var context = await listener.GetContextAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
-        var incomingState = context.Request.QueryString["state"];
-        var code = context.Request.QueryString["code"];
-        var oauthError = context.Request.QueryString["error_description"] ?? context.Request.QueryString["error"];
-        var page = "<!doctype html><html><head><meta charset='utf-8'><title>Twitch connected</title></head><body style='font:16px Segoe UI;background:#0b1020;color:#f4f6ff;padding:48px'><p>Authorization complete. Returning to Streamloots Gifter…</p><script>window.close();setTimeout(()=>{document.body.insertAdjacentHTML('beforeend','<p>You can close this tab and return to the app.</p>')},300);</script></body></html>";
-        var bytes = Encoding.UTF8.GetBytes(page);
-        context.Response.ContentType = "text/html; charset=utf-8";
-        context.Response.ContentLength64 = bytes.Length;
-        await context.Response.OutputStream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
-        context.Response.Close();
-        listener.Stop();
-        if (!string.IsNullOrEmpty(oauthError)) throw new InvalidOperationException(oauthError);
-        if (incomingState != state || string.IsNullOrWhiteSpace(code)) throw new InvalidOperationException("Twitch authorization did not complete. Please try again.");
-
-        using var tokenResponse = await _http.PostAsync("https://id.twitch.tv/oauth2/token", new FormUrlEncodedContent(new Dictionary<string, string>
-        {
-            ["client_id"] = _clientId,
-            ["client_secret"] = _clientSecret,
-            ["code"] = code,
-            ["grant_type"] = "authorization_code",
-            ["redirect_uri"] = RedirectUri
+            ["scopes"] = string.Join(' ', Scopes)
         }), cancellationToken).ConfigureAwait(false);
-        var tokenJson = await tokenResponse.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        if (!tokenResponse.IsSuccessStatusCode) throw new InvalidOperationException($"Twitch token request failed: {tokenJson}");
-        using (var tokenDoc = JsonDocument.Parse(tokenJson)) SetTokens(tokenDoc.RootElement);
+        var startJson = await startResponse.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        if (!startResponse.IsSuccessStatusCode) throw new InvalidOperationException($"Could not start Twitch sign-in: {startJson}");
+        using var startDoc = JsonDocument.Parse(startJson);
+        var start = startDoc.RootElement;
+        var deviceCode = start.GetProperty("device_code").GetString() ?? "";
+        var userCode = start.GetProperty("user_code").GetString() ?? "";
+        var verificationUri = start.GetProperty("verification_uri").GetString() ?? "https://www.twitch.tv/activate";
+        var interval = Math.Clamp(start.GetProperty("interval").GetInt32(), 1, 30);
+        var expiresAt = DateTimeOffset.UtcNow.AddSeconds(start.GetProperty("expires_in").GetInt32());
+        if (deviceCode.Length == 0 || userCode.Length == 0) throw new InvalidDataException("Twitch returned an incomplete device sign-in response.");
 
-        var users = await HelixJsonAsync("users", cancellationToken).ConfigureAwait(false);
+        DeviceCodeReady?.Invoke(userCode, verificationUri);
+        Process.Start(new ProcessStartInfo(verificationUri) { UseShellExecute = true });
+        StatusChanged?.Invoke($"Enter code {userCode} on Twitch to authorize Streamloots Gifter.");
+
+        while (DateTimeOffset.UtcNow < expiresAt)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(interval), cancellationToken).ConfigureAwait(false);
+            using var response = await _http.PostAsync(OAuthRoot + "token", new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["client_id"] = _clientId,
+                ["scopes"] = string.Join(' ', Scopes),
+                ["device_code"] = deviceCode,
+                ["grant_type"] = "urn:ietf:params:oauth:grant-type:device_code"
+            }), cancellationToken).ConfigureAwait(false);
+            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            if (response.IsSuccessStatusCode)
+            {
+                using var tokenDoc = JsonDocument.Parse(json);
+                SetTokens(tokenDoc.RootElement);
+                return;
+            }
+
+            var error = ReadOAuthError(json);
+            if (error == "authorization_pending") continue;
+            if (error == "slow_down") { interval = Math.Min(interval + 5, 60); continue; }
+            if (error is "access_denied" or "expired_token")
+                throw new InvalidOperationException(error == "access_denied" ? "Twitch authorization was denied." : "The Twitch sign-in code expired. Please try again.");
+            throw new InvalidOperationException($"Twitch sign-in failed: {json}");
+        }
+        throw new InvalidOperationException("The Twitch sign-in code expired. Please try again.");
+    }
+
+    private async Task<TwitchUser> GetCurrentUserAsync(CancellationToken cancellationToken)
+    {
+        using var users = await HelixJsonAsync("users", cancellationToken).ConfigureAwait(false);
         var userNode = users.RootElement.GetProperty("data").EnumerateArray().FirstOrDefault();
         if (userNode.ValueKind == JsonValueKind.Undefined) throw new InvalidOperationException("Could not retrieve the Twitch account.");
-        User = new TwitchUser(
+        return new TwitchUser(
             userNode.GetProperty("id").GetString() ?? "",
             userNode.GetProperty("login").GetString() ?? "",
             userNode.GetProperty("display_name").GetString() ?? "",
             userNode.TryGetProperty("profile_image_url", out var image) ? image.GetString() ?? "" : "");
-        StatusChanged?.Invoke($"Connected to {User.DisplayName}");
-        return User;
     }
+
+    private async Task ValidateTokenAsync(CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, OAuthRoot + "validate");
+        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("OAuth", _accessToken);
+        using var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.BadRequest)
+            throw new TwitchAuthorizationExpiredException("Twitch login needs to be renewed.");
+        if (!response.IsSuccessStatusCode)
+            throw new HttpRequestException($"Twitch could not validate the saved login ({(int)response.StatusCode}).");
+        using var doc = JsonDocument.Parse(json);
+        var scopes = doc.RootElement.GetProperty("scopes").EnumerateArray().Select(scope => scope.GetString()).ToHashSet(StringComparer.Ordinal);
+        if (Scopes.Any(scope => !scopes.Contains(scope)))
+            throw new TwitchAuthorizationExpiredException("Twitch permissions changed. Please connect again and approve the requested permissions.");
+    }
+
+    private static string ReadOAuthError(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.TryGetProperty("message", out var message) ? message.GetString() ?? "" :
+                doc.RootElement.TryGetProperty("error", out var error) ? error.GetString() ?? "" : "";
+        }
+        catch (JsonException) { return ""; }
+    }
+
+    private sealed class TwitchAuthorizationExpiredException(string message) : Exception(message);
 
     public async Task<IReadOnlyList<TwitchReward>> GetRewardsAsync(CancellationToken cancellationToken)
     {
@@ -147,11 +216,32 @@ public sealed class TwitchService : IAsyncDisposable
     public async Task LogoutAsync()
     {
         await StopEventSubAsync().ConfigureAwait(false);
+        var tokens = new[] { _refreshToken, _accessToken }.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct().ToArray();
+        foreach (var tokenValue in tokens)
+        {
+            try
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                using var revoke = await _http.PostAsync(OAuthRoot + "revoke", new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["client_id"] = _clientId,
+                    ["token"] = tokenValue
+                }), timeout.Token).ConfigureAwait(false);
+            }
+            catch (HttpRequestException) { }
+            catch (TaskCanceledException) { }
+        }
         User = null;
+        ClearTokens();
+        SetChatReady(false);
+    }
+
+    private void ClearTokens()
+    {
         _accessToken = "";
         _refreshToken = "";
         _tokenExpiresAt = DateTimeOffset.MinValue;
-        SetChatReady(false);
+        TwitchTokenStore.Delete();
     }
 
     private async Task RunEventSubAsync(CancellationToken token)
@@ -317,27 +407,45 @@ public sealed class TwitchService : IAsyncDisposable
         try
         {
             if (DateTimeOffset.UtcNow < _tokenExpiresAt.AddMinutes(-2)) return;
-            using var response = await _http.PostAsync("https://id.twitch.tv/oauth2/token", new FormUrlEncodedContent(new Dictionary<string, string>
-            {
-                ["client_id"] = _clientId,
-                ["client_secret"] = _clientSecret,
-                ["grant_type"] = "refresh_token",
-                ["refresh_token"] = _refreshToken
-            }), token).ConfigureAwait(false);
-            var json = await response.Content.ReadAsStringAsync(token).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"Could not refresh Twitch login: {json}");
-            using var doc = JsonDocument.Parse(json);
-            SetTokens(doc.RootElement);
+            if (string.IsNullOrWhiteSpace(_refreshToken)) throw new TwitchAuthorizationExpiredException("Twitch login expired. Connect Twitch again.");
+            await RefreshTokenAsync(token).ConfigureAwait(false);
         }
         finally { _refreshLock.Release(); }
     }
 
+    private async Task RefreshTokenAsync(CancellationToken token)
+    {
+        using var response = await _http.PostAsync(OAuthRoot + "token", new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["client_id"] = _clientId,
+            ["grant_type"] = "refresh_token",
+            ["refresh_token"] = _refreshToken
+        }), token).ConfigureAwait(false);
+        var json = await response.Content.ReadAsStringAsync(token).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            var error = ReadOAuthError(json);
+            if (response.StatusCode is HttpStatusCode.BadRequest or HttpStatusCode.Unauthorized || error.Contains("invalid", StringComparison.OrdinalIgnoreCase))
+                throw new TwitchAuthorizationExpiredException("Saved Twitch login expired or was revoked.");
+            throw new InvalidOperationException($"Could not refresh Twitch login: {json}");
+        }
+        using var doc = JsonDocument.Parse(json);
+        SetTokens(doc.RootElement);
+    }
+
     private void SetTokens(JsonElement tokenResponse)
     {
-        _accessToken = tokenResponse.GetProperty("access_token").GetString() ?? "";
-        if (tokenResponse.TryGetProperty("refresh_token", out var refresh)) _refreshToken = refresh.GetString() ?? "";
+        var access = tokenResponse.GetProperty("access_token").GetString() ?? "";
+        var refresh = tokenResponse.TryGetProperty("refresh_token", out var refreshNode) ? refreshNode.GetString() ?? "" : "";
+        if (access.Length == 0 || refresh.Length == 0)
+            throw new InvalidDataException("Twitch did not return the access and refresh tokens needed to keep this connection safe.");
         var seconds = tokenResponse.TryGetProperty("expires_in", out var expires) ? expires.GetInt32() : 14_400;
-        _tokenExpiresAt = DateTimeOffset.UtcNow.AddSeconds(seconds);
+        var expiresAt = DateTimeOffset.UtcNow.AddSeconds(seconds);
+        // Persist the rotated refresh token before exposing the new session to API calls.
+        TwitchTokenStore.Save(new StoredTwitchTokens(access, refresh, expiresAt));
+        _accessToken = access;
+        _refreshToken = refresh;
+        _tokenExpiresAt = expiresAt;
     }
 
     private static async Task<string> ReceiveMessageAsync(ClientWebSocket socket, CancellationToken token)

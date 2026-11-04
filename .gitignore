@@ -8,8 +8,10 @@ obj/
 .streamloots_bridge_key
 gift_queue.json
 gift_queue.json.tmp
+gift_queue.json.journal
 config.json
 dist/
+.update-signing-private.pem
 StreamerShare/
 StreamerShare - Copy/
 StreamerShare.rar

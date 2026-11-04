@@ -2,7 +2,6 @@ const statusDot = document.getElementById("status-dot");
 const statusTitle = document.getElementById("status-title");
 const statusDetail = document.getElementById("status-detail");
 const toast = document.getElementById("toast");
-const connectButton = document.getElementById("connect");
 const manualKeyInput = document.getElementById("manual-key");
 const manualConnectButton = document.getElementById("connect-manual");
 const disconnectButton = document.getElementById("disconnect");
@@ -31,7 +30,6 @@ async function copyKey(token) {
 }
 
 async function refreshStatus() {
-  connectButton.disabled = false;
   try {
     const result = await send("bridge-status");
     const lastCard = result.activityFeedLastCard;
@@ -59,7 +57,7 @@ async function refreshStatus() {
     } else if (result.reason === "disconnected") {
       setStatus("Not connected", "Get a key from the running Streamloots Gifter app.");
     } else if (result.reason === "key-invalid") {
-      setStatus("Key needs refreshing", "Use Get key & connect to pair this extension again.", "error");
+      setStatus("Key needs refreshing", "Copy the current Bridge key from the app and connect again.", "error");
       disconnectButton.disabled = false;
     } else {
       setStatus("App not reachable", "Open Streamloots Gifter, then try again.", "error");
@@ -79,12 +77,6 @@ async function runButton(button, action) {
   catch (error) { setStatus("Could not connect", error.message, "error"); }
   finally { await refreshStatus(); }
 }
-
-connectButton.addEventListener("click", () => runButton(connectButton, async () => {
-  setStatus("Connecting…", "Requesting a key from the local app.");
-  const { token } = await send("pair-bridge");
-  await copyKey(token);
-}));
 
 manualConnectButton.addEventListener("click", () => runButton(manualConnectButton, async () => {
   const key = manualKeyInput.value.trim();

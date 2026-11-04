@@ -6,13 +6,14 @@ using System.Text.RegularExpressions;
 
 namespace StreamlootsManager;
 
-public sealed record AppUpdateRelease(Version Version, string Tag, string AssetName, Uri DownloadUri, string Notes, string? Sha256);
+public sealed record AppUpdateRelease(Version Version, string Tag, string AssetName, Uri DownloadUri, Uri SignatureUri, string Notes, string? Sha256);
 
 public static class AppUpdater
 {
     private static readonly HttpClient Client = CreateClient();
     private const long MaximumUpdateBytes = 300L * 1024 * 1024;
     private static readonly Regex RepositoryPattern = new("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", RegexOptions.Compiled);
+    private static readonly string PinnedUpdatePublicKey = LoadPinnedUpdatePublicKey();
 
     public static Version CurrentVersion => typeof(AppUpdater).Assembly.GetName().Version ?? new Version(0, 0, 0);
     public static bool IsValidRepository(string? value) => !string.IsNullOrWhiteSpace(value) && RepositoryPattern.IsMatch(value.Trim());
@@ -51,8 +52,19 @@ public static class AppUpdater
                 var raw = digestValue.GetString();
                 if (raw?.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase) == true) digest = raw[7..];
             }
+            if (string.IsNullOrWhiteSpace(digest) || digest.Length != 64 || !digest.All(Uri.IsHexDigit))
+                throw new InvalidDataException("This release asset has no valid SHA-256 digest. Update installation was stopped because the download could not be verified.");
+            var signatureName = name + ".sig";
+            var signatureAsset = assets.EnumerateArray().FirstOrDefault(candidate =>
+                candidate.TryGetProperty("name", out var signatureNameValue) &&
+                string.Equals(signatureNameValue.GetString(), signatureName, StringComparison.Ordinal));
+            if (signatureAsset.ValueKind == JsonValueKind.Undefined ||
+                !signatureAsset.TryGetProperty("browser_download_url", out var signatureUrlValue) ||
+                !Uri.TryCreate(signatureUrlValue.GetString(), UriKind.Absolute, out var signatureUri) ||
+                signatureUri.Scheme != Uri.UriSchemeHttps || !signatureUri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("The latest update is missing its publisher signature. Update installation was stopped.");
             var notes = root.TryGetProperty("body", out var bodyValue) ? bodyValue.GetString() ?? "" : "";
-            return new AppUpdateRelease(version, tag, name, downloadUri, notes, digest);
+            return new AppUpdateRelease(version, tag, name, downloadUri, signatureUri, notes, digest);
         }
         throw new InvalidDataException("The latest release is missing a StreamlootsGifter-Update-v*.zip asset.");
     }
@@ -67,32 +79,48 @@ public static class AppUpdater
         var updateDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "StreamlootsGifter", "Updates");
         Directory.CreateDirectory(updateDirectory);
         var destination = Path.Combine(updateDirectory, $"{Guid.NewGuid():N}-{Path.GetFileName(release.AssetName)}");
-        await using (var input = await response.Content.ReadAsStreamAsync(cancellationToken))
-        await using (var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, useAsync: true))
+        try
         {
-            var buffer = new byte[81920];
-            long total = 0;
-            int read;
-            while ((read = await input.ReadAsync(buffer, cancellationToken)) > 0)
+            await using (var input = await response.Content.ReadAsStreamAsync(cancellationToken))
+            await using (var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, useAsync: true))
             {
-                total += read;
-                if (total > MaximumUpdateBytes) throw new InvalidDataException("The update download is larger than the allowed 300 MB limit.");
-                await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
-                if (response.Content.Headers.ContentLength is > 0 and var length) progress?.Report(Math.Clamp((double)total / length, 0, 1));
+                var buffer = new byte[81920];
+                long total = 0;
+                int read;
+                while ((read = await input.ReadAsync(buffer, cancellationToken)) > 0)
+                {
+                    total += read;
+                    if (total > MaximumUpdateBytes) throw new InvalidDataException("The update download is larger than the allowed 300 MB limit.");
+                    await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                    if (response.Content.Headers.ContentLength is > 0 and var length) progress?.Report(Math.Clamp((double)total / length, 0, 1));
+                }
             }
-        }
 
-        if (!string.IsNullOrWhiteSpace(release.Sha256))
-        {
+            if (string.IsNullOrWhiteSpace(release.Sha256) || release.Sha256.Length != 64 || !release.Sha256.All(Uri.IsHexDigit))
+                throw new InvalidDataException("The update did not include a valid SHA-256 digest.");
             await using var file = File.OpenRead(destination);
             var actual = Convert.ToHexString(await System.Security.Cryptography.SHA256.HashDataAsync(file, cancellationToken));
             if (!actual.Equals(release.Sha256, StringComparison.OrdinalIgnoreCase))
-            {
-                File.Delete(destination);
                 throw new InvalidDataException("The downloaded update did not match GitHub's SHA-256 digest.");
-            }
+            using var signatureResponse = await Client.GetAsync(release.SignatureUri, cancellationToken);
+            signatureResponse.EnsureSuccessStatusCode();
+            if (signatureResponse.Content.Headers.ContentLength is > 4096)
+                throw new InvalidDataException("The update signature asset is invalid.");
+            var encodedSignature = (await ReadBoundedTextAsync(signatureResponse.Content, 4096, cancellationToken)).Trim();
+            byte[] signature;
+            try { signature = Convert.FromBase64String(encodedSignature); }
+            catch (FormatException ex) { throw new InvalidDataException("The update publisher signature is not valid Base64.", ex); }
+            using var rsa = System.Security.Cryptography.RSA.Create();
+            rsa.ImportFromPem(PinnedUpdatePublicKey);
+            if (!rsa.VerifyHash(Convert.FromHexString(actual), signature, System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.RSASignaturePadding.Pss))
+                throw new InvalidDataException("The update publisher signature is invalid. The package was not installed.");
+            return destination;
         }
-        return destination;
+        catch
+        {
+            try { if (File.Exists(destination)) File.Delete(destination); } catch (IOException) { }
+            throw;
+        }
     }
 
     public static void LaunchInstaller(string archivePath, string installRoot, int processId)
@@ -134,5 +162,28 @@ public static class AppUpdater
         client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("StreamlootsGifter", CurrentVersion.ToString(3)));
         client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
         return client;
+    }
+
+    private static string LoadPinnedUpdatePublicKey()
+    {
+        using var stream = typeof(AppUpdater).Assembly.GetManifestResourceStream("StreamlootsManager.UpdateSigningPublicKey.pem")
+            ?? throw new InvalidOperationException("The pinned update verification key is missing from this app build.");
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    }
+
+    private static async Task<string> ReadBoundedTextAsync(HttpContent content, int maximumBytes, CancellationToken cancellationToken)
+    {
+        await using var stream = await content.ReadAsStreamAsync(cancellationToken);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[1024];
+        int read;
+        while ((read = await stream.ReadAsync(chunk, cancellationToken)) > 0)
+        {
+            if (buffer.Length + read > maximumBytes)
+                throw new InvalidDataException("The update signature asset is invalid.");
+            await buffer.WriteAsync(chunk.AsMemory(0, read), cancellationToken);
+        }
+        return System.Text.Encoding.UTF8.GetString(buffer.ToArray());
     }
 }

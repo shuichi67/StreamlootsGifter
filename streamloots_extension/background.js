@@ -55,20 +55,6 @@ async function checkConnection() {
   }
 }
 
-async function pairExtension() {
-  const response = await fetch(`${BRIDGE}/pair`, {
-    method: "GET",
-    cache: "no-store",
-    // Match manual validation's extension-origin preflight. The local Bridge
-    // uses that origin to decide whether the pairing endpoint may return a key.
-    headers: { "Content-Type": "application/json" }
-  });
-  const { token } = await readResponse(response);
-  if (!token) throw new Error("The app did not return a Bridge key.");
-  await chrome.storage.local.set({ token });
-  return { ok: true, token };
-}
-
 async function connectWithKey(value) {
   const token = String(value || "").trim();
   if (!token) throw new Error("Paste the Bridge key copied from Streamloots Gifter.");
@@ -97,9 +83,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       break;
     case "get-streamloots-language":
       task = callBridge("/extension-settings");
-      break;
-    case "pair-bridge":
-      task = pairExtension();
       break;
     case "connect-with-key":
       task = connectWithKey(message.token);

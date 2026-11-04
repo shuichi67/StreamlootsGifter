@@ -1,6 +1,7 @@
 param(
     [string]$Version = "",
-    [switch]$IncludeFullDownload
+    [switch]$IncludeFullDownload,
+    [string]$SigningKeyPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -53,8 +54,7 @@ if ($IncludeFullDownload) {
     $fullPackageRoot = Join-Path $workRoot "full-package"
     New-Item -ItemType Directory -Path $fullPackageRoot -Force | Out-Null
     Copy-Item -Path (Join-Path $publishRoot "*") -Destination $fullPackageRoot -Recurse -Force
-    Set-Content -LiteralPath (Join-Path $fullPackageRoot ".env") -Value @("TWITCH_CLIENT_ID=", "TWITCH_CLIENT_SECRET=") -Encoding UTF8
-    foreach ($protectedName in @("config.json", "gift_queue.json", "gift_queue.json.tmp", ".streamloots_bridge_key")) {
+    foreach ($protectedName in @("config.json", "gift_queue.json", "gift_queue.json.tmp", "gift_queue.json.journal", ".streamloots_bridge_key")) {
         $protectedPath = Join-Path $fullPackageRoot $protectedName
         if (Test-Path -LiteralPath $protectedPath -PathType Leaf) { Remove-Item -LiteralPath $protectedPath -Force }
     }
@@ -63,7 +63,7 @@ if ($IncludeFullDownload) {
 }
 
 # These are installation-specific data. They must never be placed in an update ZIP.
-$protectedTopLevelFiles = @(".env", "config.json", "gift_queue.json", "gift_queue.json.tmp", ".streamloots_bridge_key")
+$protectedTopLevelFiles = @(".env", "config.json", "gift_queue.json", "gift_queue.json.tmp", "gift_queue.json.journal", ".streamloots_bridge_key")
 $changedCount = 0
 foreach ($sourceFile in Get-ChildItem -LiteralPath $publishRoot -File -Recurse) {
     $relativePath = $sourceFile.FullName.Substring($publishRoot.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
@@ -99,7 +99,7 @@ STREAMLOOTS GIFTER UPDATE $Version
 4. Select the existing Streamloots Gifter folder (the one containing StreamlootsGifter.exe).
 5. After the update finishes, reload the unpacked extension at chrome://extensions and refresh the Streamloots Activity Feed tab.
 
-The updater backs up changed application files and keeps your .env, config.json, gift_queue.json, and .streamloots_bridge_key in place.
+The updater backs up changed application files and keeps your local config.json, gift_queue.json, and .streamloots_bridge_key in place. Twitch tokens are stored separately, encrypted for your Windows account.
 Keep the update ZIP until you have opened the app and confirmed the update worked.
 "@
 Set-Content -LiteralPath (Join-Path $packageRoot "UPDATE_README.txt") -Value $readme -Encoding UTF8
@@ -107,11 +107,30 @@ Set-Content -LiteralPath (Join-Path $packageRoot "UPDATE_README.txt") -Value $re
 $archivePath = Join-Path $distRoot "StreamlootsGifter-Update-v$Version-$stamp.zip"
 Compress-Archive -Path (Join-Path $packageRoot "*") -DestinationPath $archivePath -CompressionLevel Optimal
 
+if ([string]::IsNullOrWhiteSpace($SigningKeyPath)) {
+    $SigningKeyPath = $env:STREAMLOOTS_UPDATE_SIGNING_KEY
+}
+if ([string]::IsNullOrWhiteSpace($SigningKeyPath)) {
+    $SigningKeyPath = Join-Path $projectRoot ".update-signing-private.pem"
+}
+if (-not (Test-Path -LiteralPath $SigningKeyPath -PathType Leaf)) {
+    throw "Update signing key not found. Keep the private PEM key out of GitHub and pass -SigningKeyPath or set STREAMLOOTS_UPDATE_SIGNING_KEY."
+}
+$pinnedPublicKeyPath = Join-Path $PSScriptRoot "update_signing_public.pem"
+if (-not (Test-Path -LiteralPath $pinnedPublicKeyPath -PathType Leaf)) {
+    throw "Pinned update verification key not found: $pinnedPublicKeyPath"
+}
+$signingTool = Join-Path $PSScriptRoot "UpdateSigningTool\UpdateSigningTool.csproj"
+if (-not (Test-Path -LiteralPath $signingTool -PathType Leaf)) { throw "Update signing helper not found: $signingTool" }
+& dotnet run --project $signingTool --configuration Release --no-launch-profile -- $archivePath $SigningKeyPath $pinnedPublicKeyPath
+if ($LASTEXITCODE -ne 0) { throw "Update signing failed with exit code $LASTEXITCODE." }
+
 Write-Host "Update package created: $archivePath"
+Write-Host "Publisher signature created: $archivePath.sig (upload both assets to the GitHub release)"
 if ($fullArchivePath) { Write-Host "First-download package created: $fullArchivePath" }
 Write-Host "Changed payload files: $changedCount"
-Write-Host "The update package excludes credentials, settings, claim history, queue, and Bridge key."
-if ($IncludeFullDownload) { Write-Host "The full download package contains blank Twitch credentials and no developer data." }
+Write-Host "The update package excludes Twitch tokens, settings, claim history, queue, and Bridge key."
+if ($IncludeFullDownload) { Write-Host "The full download package contains no developer or streamer credentials." }
 
 $resolvedDistRoot = [IO.Path]::GetFullPath($distRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
 $resolvedWorkRoot = [IO.Path]::GetFullPath($workRoot)

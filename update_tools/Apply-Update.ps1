@@ -44,7 +44,7 @@ try {
     New-Item -ItemType Directory -Path $backupFiles -Force | Out-Null
 
     # Protect local credentials and state even if an update archive was assembled incorrectly.
-    $protected = @(".env", "config.json", "gift_queue.json", "gift_queue.json.tmp", ".streamloots_bridge_key")
+    $protected = @(".env", "config.json", "gift_queue.json", "gift_queue.json.tmp", "gift_queue.json.journal", ".streamloots_bridge_key")
     foreach ($name in $protected) {
         $source = Join-Path $InstallRoot $name
         if (Test-Path -LiteralPath $source -PathType Leaf) {
@@ -92,7 +92,7 @@ try {
         throw
     }
 
-    [System.Windows.Forms.MessageBox]::Show("Update applied successfully.`r`n`r`nYour settings, Twitch credentials, claim history, queue, and Bridge key were preserved.`r`n`r`nIf you use a locally loaded extension, reload it in the browser's extensions page.", "Streamloots Gifter update", "OK", "Information") | Out-Null
+    [System.Windows.Forms.MessageBox]::Show("Update applied successfully.`r`n`r`nYour encrypted Twitch session, settings, claim history, queue, and Bridge key were preserved.`r`n`r`nIf you use a locally loaded extension, reload it in the browser's extensions page.", "Streamloots Gifter update", "OK", "Information") | Out-Null
     # Let the user read and dismiss the completion notice before the app starts;
     # otherwise the restarted window can cover the update instructions.
     if ($Restart) { Start-Process -FilePath (Join-Path $InstallRoot "StreamlootsGifter.exe") -WorkingDirectory $InstallRoot }
