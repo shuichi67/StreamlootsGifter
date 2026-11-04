@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 
 if (args.Length != 3)
 {
-    Console.Error.WriteLine("Usage: UpdateSigningTool <update.zip> <private-key.pem> <pinned-public-key.pem>");
+    Console.Error.WriteLine("Usage: UpdateSigningTool <package.zip> <private-key.pem> <pinned-public-key.pem>");
     return 2;
 }
 
@@ -47,5 +47,5 @@ await using var archive = File.OpenRead(archivePath);
 var archiveHash = await SHA256.HashDataAsync(archive);
 var signature = signer.SignHash(archiveHash, HashAlgorithmName.SHA256, RSASignaturePadding.Pss);
 await File.WriteAllTextAsync(archivePath + ".sig", Convert.ToBase64String(signature), new System.Text.UTF8Encoding(false));
-Console.WriteLine("Private key matches the app's pinned public key; update signature created.");
+Console.WriteLine($"Private key matches the app's pinned public key; package signature created for {Path.GetFileName(archivePath)}.");
 return 0;

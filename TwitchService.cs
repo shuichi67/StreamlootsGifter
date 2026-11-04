@@ -32,6 +32,7 @@ public sealed class TwitchService : IAsyncDisposable
     }
 
     public TwitchUser? User { get; private set; }
+    public bool HasSavedSession => !string.IsNullOrWhiteSpace(_refreshToken);
     public bool IsChatReady { get; private set; }
     public event Action<string>? StatusChanged;
     public event Action<string, string>? DeviceCodeReady;
@@ -59,8 +60,24 @@ public sealed class TwitchService : IAsyncDisposable
         {
             try
             {
-                await RefreshTokenAsync(cancellationToken).ConfigureAwait(false);
-                await ValidateTokenAsync(cancellationToken).ConfigureAwait(false);
+                var needsValidation = true;
+                if (!string.IsNullOrWhiteSpace(_accessToken) && DateTimeOffset.UtcNow < _tokenExpiresAt.AddMinutes(-2))
+                {
+                    try
+                    {
+                        await ValidateTokenAsync(cancellationToken).ConfigureAwait(false);
+                        needsValidation = false;
+                    }
+                    catch (TwitchAuthorizationExpiredException)
+                    {
+                        await RefreshTokenAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                }
+                else
+                {
+                    await RefreshTokenAsync(cancellationToken).ConfigureAwait(false);
+                }
+                if (needsValidation) await ValidateTokenAsync(cancellationToken).ConfigureAwait(false);
                 User = await GetCurrentUserAsync(cancellationToken).ConfigureAwait(false);
                 StatusChanged?.Invoke($"Connected to {User.DisplayName}");
                 return User;

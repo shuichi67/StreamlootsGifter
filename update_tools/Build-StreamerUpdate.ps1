@@ -41,7 +41,7 @@ $publishArgs = @(
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXITCODE." }
 
 Copy-Item -LiteralPath $extensionSource -Destination (Join-Path $publishRoot "streamloots_extension") -Recurse -Force
-foreach ($fileName in @("README.txt", "TWITCH_SETUP.txt", ".env.example")) {
+foreach ($fileName in @("README.txt", "TWITCH_SETUP.txt")) {
     $sourceFile = Join-Path $baselineRoot $fileName
     if (Test-Path -LiteralPath $sourceFile) { Copy-Item -LiteralPath $sourceFile -Destination (Join-Path $publishRoot $fileName) -Force }
 }
@@ -122,12 +122,20 @@ if (-not (Test-Path -LiteralPath $pinnedPublicKeyPath -PathType Leaf)) {
 }
 $signingTool = Join-Path $PSScriptRoot "UpdateSigningTool\UpdateSigningTool.csproj"
 if (-not (Test-Path -LiteralPath $signingTool -PathType Leaf)) { throw "Update signing helper not found: $signingTool" }
-& dotnet run --project $signingTool --configuration Release --no-launch-profile -- $archivePath $SigningKeyPath $pinnedPublicKeyPath
-if ($LASTEXITCODE -ne 0) { throw "Update signing failed with exit code $LASTEXITCODE." }
+$archivesToSign = @($archivePath)
+if ($fullArchivePath) { $archivesToSign += $fullArchivePath }
+foreach ($packageArchive in $archivesToSign) {
+    & dotnet run --project $signingTool --configuration Release --no-launch-profile -- $packageArchive $SigningKeyPath $pinnedPublicKeyPath
+    if ($LASTEXITCODE -ne 0) { throw "Package signing failed for $packageArchive with exit code $LASTEXITCODE." }
+}
 
 Write-Host "Update package created: $archivePath"
-Write-Host "Publisher signature created: $archivePath.sig (upload both assets to the GitHub release)"
-if ($fullArchivePath) { Write-Host "First-download package created: $fullArchivePath" }
+Write-Host "Publisher signature created: $archivePath.sig"
+if ($fullArchivePath) {
+    Write-Host "First-download package created: $fullArchivePath"
+    Write-Host "Publisher signature created: $fullArchivePath.sig"
+}
+Write-Host "Upload each ZIP and its matching .sig file to the same GitHub release."
 Write-Host "Changed payload files: $changedCount"
 Write-Host "The update package excludes Twitch tokens, settings, claim history, queue, and Bridge key."
 if ($IncludeFullDownload) { Write-Host "The full download package contains no developer or streamer credentials." }

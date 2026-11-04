@@ -46,7 +46,7 @@
         <Button x:Name="LoginHelpButton" Grid.Column="0" Content="?" Width="54" Height="54" Margin="0,0,12,0" Padding="0"
                 HorizontalAlignment="Right" VerticalAlignment="Center" Panel.ZIndex="2"
                 FontSize="28" FontWeight="Bold" Background="{DynamicResource ButtonBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="1"
-                ToolTip="Twitch login setup guide" Click="LoginHelpButton_Click"/>
+                ToolTip="Twitch sign-in guide" Click="LoginHelpButton_Click"/>
         <Border x:Name="LoginHelpPanel" Grid.Column="1" Width="520" MaxHeight="740" Margin="18,0,0,0" Visibility="Collapsed"
                 Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" CornerRadius="18" Padding="0">
           <Grid>
@@ -54,8 +54,8 @@
             <Border Grid.Row="0" Background="{DynamicResource ButtonBrush}" CornerRadius="18,18,0,0" Padding="22,18">
               <Grid>
                 <StackPanel>
-                  <TextBlock Text="Twitch login setup" FontSize="22" FontWeight="Bold"/>
-                  <TextBlock Text="Follow these steps once, then sign in." Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0"/>
+                  <TextBlock Text="Twitch sign-in" FontSize="22" FontWeight="Bold"/>
+                  <TextBlock Text="Authorize once; saved sessions reconnect automatically." Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0"/>
                 </StackPanel>
                 <Button Grid.Column="1" Width="36" Height="36" Padding="0" HorizontalAlignment="Right" VerticalAlignment="Top"
                         Background="{DynamicResource InputBrush}" Click="LoginHelpButton_Click" ToolTip="Close setup guide">
@@ -74,15 +74,15 @@
                 <TextBlock Text="2  Approve access on Twitch" FontSize="16" FontWeight="Bold" Margin="0,20,0,8"/>
                 <TextBlock Text="Sign in on twitch.tv if needed, enter the code shown in the app, and approve the requested permissions. The code is copied to your clipboard automatically." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}"/>
                 <TextBlock Text="3  Return to Streamloots Gifter" FontSize="16" FontWeight="Bold" Margin="0,20,0,8"/>
-                <TextBlock Text="The app completes the connection automatically. Your Twitch password is entered only on Twitch; no Client Secret or .env setup is needed." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}"/>
+                <TextBlock Text="The app completes the connection automatically. Your Twitch password stays on Twitch; no developer app or local credential file is needed." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}"/>
                 <Border Background="{DynamicResource InputBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" CornerRadius="8" Padding="12" Margin="0,18,0,0">
-                  <TextBlock Text="The app stores its rotating Twitch session encrypted for your Windows account. If Twitch access expires or is revoked, connect again." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}"/>
+                  <TextBlock Text="The app encrypts the saved Twitch session for your Windows account. Twitch may require sign-in again after 30 days without use or if access is revoked." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}"/>
                 </Border>
                 <TextBox Text="https://dev.twitch.tv/docs/authentication/getting-tokens-oauth/" IsReadOnly="True" IsReadOnlyCaretVisible="True" TextWrapping="Wrap" MinHeight="36"/>
               </StackPanel>
             </ScrollViewer>
             <Border Grid.Row="2" BorderBrush="{DynamicResource LineBrush}" BorderThickness="0,1,0,0" Padding="18,12">
-              <Button Content="Copy setup instructions" HorizontalAlignment="Right" Background="{DynamicResource AccentBrush}" Foreground="White" Click="CopyLoginGuide_Click"/>
+              <Button Content="Copy sign-in steps" HorizontalAlignment="Right" Background="{DynamicResource AccentBrush}" Foreground="White" Click="CopyLoginGuide_Click"/>
             </Border>
           </Grid>
         </Border>

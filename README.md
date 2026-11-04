@@ -49,9 +49,9 @@ The in-app updater requires both the GitHub SHA-256 digest and a publisher signa
 
 ### 2. Sign in to Twitch
 
-Start `StreamlootsGifter.exe` and click **Continue with Twitch**. The app opens Twitch’s official activation page and shows a one-time code. Sign in on `twitch.tv` if asked, enter that code, and approve the requested access. Return to the app; it completes the connection automatically. You never enter your Twitch password or a Client Secret into Streamloots Gifter.
+Start `StreamlootsGifter.exe` and click **Continue with Twitch**. The app opens Twitch’s official activation page and shows a one-time code. Sign in on `twitch.tv` if asked, enter that code, and approve the requested access. Return to the app; it completes the connection automatically. You never enter your Twitch password or a Client Secret into Streamloots Gifter. On later launches, the app restores the saved session automatically.
 
-The app saves the Twitch session encrypted for the current Windows account. Refresh tokens rotate when renewed; the app saves each replacement. If Twitch access is revoked or expires after a long period of inactivity, connect again.
+The app saves the Twitch session encrypted for the current Windows account. Twitch may require a new sign-in after 30 days without use or if access is revoked.
 
 ### 3. Install the browser extension
 

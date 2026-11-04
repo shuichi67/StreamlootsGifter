@@ -101,19 +101,49 @@ function findGiftForm() {
 }
 
 async function closeGiftForm(form) {
-  const current = findGiftForm() || form;
-  if (!current || !visible(current)) return;
-  const closeButton = [...current.querySelectorAll('button, [role="button"]')].find(button => {
-    const label = `${button.getAttribute("aria-label") || ""} ${button.getAttribute("title") || ""} ${button.textContent || ""}`.trim();
-    return /^(?:close|dismiss|cerrar|×|✕|x)$/i.test(label);
+  const formRoot = findGiftForm() || form;
+  if (!formRoot || !visible(formRoot)) return true;
+
+  const hasCloseControl = element => [...element.querySelectorAll('button, [role="button"], [data-testid], [class*="close"], [class*="Close"]')].some(button => {
+    const label = [
+      button.getAttribute("aria-label"), button.getAttribute("title"), button.getAttribute("data-testid"),
+      typeof button.className === "string" ? button.className : "", button.textContent
+    ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+    return /^(?:close|dismiss|cerrar|×|✕|x)$/i.test(label) || /(?:^|[\s_-])(?:close|dismiss|cerrar)(?:$|[\s_-])/i.test(label);
   });
-  if (closeButton) {
-    closeButton.click();
-  } else {
-    current.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+
+  let shell = formRoot;
+  let ancestor = formRoot;
+  for (let depth = 0; depth < 7 && ancestor.parentElement && ancestor.parentElement !== document.body; depth++) {
+    ancestor = ancestor.parentElement;
+    const classNames = typeof ancestor.className === "string" ? ancestor.className.toLowerCase() : "";
+    const looksLikeDialog = ancestor.getAttribute("role") === "dialog" || ancestor.getAttribute("aria-modal") === "true" ||
+      classNames.includes("modal") || classNames.includes("drawer") || classNames.includes("dialog");
+    if (hasCloseControl(ancestor) || looksLikeDialog) {
+      shell = ancestor;
+      if (hasCloseControl(ancestor)) break;
+    }
   }
-  await sleep(200);
+
+  const closeButton = [...shell.querySelectorAll('button, [role="button"], [data-testid], [class*="close"], [class*="Close"]')].find(button => {
+    if (!visible(button)) return false;
+    const label = [
+      button.getAttribute("aria-label"), button.getAttribute("title"), button.getAttribute("data-testid"),
+      typeof button.className === "string" ? button.className : "", button.textContent
+    ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+    return /^(?:close|dismiss|cerrar|×|✕|x)$/i.test(label) || /(?:^|[\s_-])(?:close|dismiss|cerrar)(?:$|[\s_-])/i.test(label);
+  });
+
+  if (closeButton) closeButton.click();
+  await waitFor(() => !findGiftForm() ? true : null, 1400).catch(() => null);
+  if (!findGiftForm()) return true;
+
+  for (const target of [shell, document, window]) {
+    target.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+    target.dispatchEvent(new KeyboardEvent("keyup", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+  }
+  await waitFor(() => !findGiftForm() ? true : null, 1400).catch(() => null);
+  return !findGiftForm();
 }
 
 function visibleNotices() {
@@ -825,19 +855,19 @@ async function sendGift(job) {
     if (updatedRecipient && !updatedRecipient.value.trim()) return "form-reset";
     return null;
   }, 12000).catch(() => null);
-  if (outcome === "closed") return;
+  if (outcome === "closed") return { formClosed: true };
 
   const visibleText = findGiftForm()?.innerText || document.body.innerText || "";
   const notFound = /\b(?:user|username|recipient)\b.{0,60}\bnot found\b|\bnot found\b.{0,60}\b(?:user|username|recipient)\b|\b(?:user|username)\b.{0,40}\b(?:does not exist|doesn't exist|could not be found)\b|(?:usuario|nombre de usuario|destinatario).{0,60}(?:no encontrado|no existe|no se encontr[oó])|(?:no encontrado|no existe|no se encontr[oó]).{0,60}(?:usuario|destinatario)/i.test(visibleText);
   const relevantError = visibleText.match(/(?:limit|not found|invalid|unable|error|l[ií]mite|no encontrado|no existe|inv[aá]lido|no se pudo|error)[^\n]*/i)?.[0];
   const successful = outcome === "confirmed" || (outcome === "form-reset" && !relevantError);
-  await closeGiftForm(form);
+  const formClosed = await closeGiftForm(form);
   if (notFound) {
     const error = new Error("Streamloots username was not found.");
     error.code = "not_found";
     throw error;
   }
-  if (successful) return;
+  if (successful) return { formClosed };
   throw new Error(
     relevantError
       ? `Streamloots did not confirm the gift: ${relevantError}`
@@ -864,10 +894,14 @@ async function poll() {
     }
 
     try {
-      await sendGift(job);
+      const giftResult = await sendGift(job);
       const result = await chrome.runtime.sendMessage({
         type: "complete-gift",
-        payload: { job_id: job.job_id, result: "sent", detail: "Gift form closed after submission." }
+        payload: {
+          job_id: job.job_id,
+          result: "sent",
+          detail: giftResult?.formClosed ? "Gift sent and gift form closed." : "Gift sent, but Streamloots kept the gift form open."
+        }
       });
       await recordPollStatus(result?.error || "");
     } catch (error) {

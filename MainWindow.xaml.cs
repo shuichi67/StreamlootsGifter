@@ -357,6 +357,8 @@ public partial class MainWindow : Window
             MessageBox.Show(this, ex.Message, "Local Gifting Bridge", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         await LoadProfileImageAsync();
+        if (_twitch.HasSavedSession)
+            await ConnectTwitchAsync();
         if (_config.CheckUpdatesOnStartup)
             await CheckForStartupUpdateAsync();
     }
@@ -371,10 +373,12 @@ public partial class MainWindow : Window
         await _giftQueue.DisposeAsync();
     }
 
-    private async void LoginButton_Click(object sender, RoutedEventArgs e)
+    private async void LoginButton_Click(object sender, RoutedEventArgs e) => await ConnectTwitchAsync();
+
+    private async Task ConnectTwitchAsync()
     {
         LoginButton.IsEnabled = false;
-        LoginStatus.Text = "Opening Twitch authorization…";
+        LoginStatus.Text = _twitch.HasSavedSession ? "Restoring your Twitch session…" : "Opening Twitch authorization…";
         LoginError.Text = "";
         try
         {
@@ -416,7 +420,7 @@ public partial class MainWindow : Window
         LoginCard.RenderTransform = new TranslateTransform(_loginHelpShiftX, 0);
         LoginHelpPanel.RenderTransform = new TranslateTransform(54, 0);
         _loginHelpIsOpen = true;
-        LoginHelpButton.ToolTip = "Close Twitch login setup guide";
+        LoginHelpButton.ToolTip = "Close Twitch sign-in guide";
 
         var easing = new CubicEase { EasingMode = EasingMode.EaseOut };
         var duration = TimeSpan.FromMilliseconds(260);
@@ -432,7 +436,7 @@ public partial class MainWindow : Window
     {
         if (!_loginHelpIsOpen) return;
         _loginHelpIsOpen = false;
-        LoginHelpButton.ToolTip = "Twitch login setup guide";
+        LoginHelpButton.ToolTip = "Twitch sign-in guide";
         var cardTransform = LoginCard.RenderTransform as TranslateTransform ?? new TranslateTransform();
         var panelTransform = LoginHelpPanel.RenderTransform as TranslateTransform ?? new TranslateTransform();
         LoginCard.RenderTransform = cardTransform;
@@ -466,21 +470,21 @@ public partial class MainWindow : Window
 
     private void CopyLoginGuide_Click(object sender, RoutedEventArgs e)
     {
-        const string guide = "STREAMLOOTS GIFTER — TWITCH LOGIN\r\n\r\n" +
-            "1. Click Continue with Twitch in Streamloots Gifter.\r\n" +
+        const string guide = "STREAMLOOTS GIFTER — TWITCH SIGN-IN\r\n\r\n" +
+            "1. On first sign-in, click Continue with Twitch in Streamloots Gifter. Saved sessions reconnect automatically on later launches.\r\n" +
             "2. Twitch opens its official activation page. A sign-in code is copied to your clipboard and shown in the app.\r\n" +
             "3. Sign in on twitch.tv if needed, enter the code, and approve access.\r\n" +
             "4. Return to Streamloots Gifter. The connection finishes automatically.\r\n\r\n" +
-            "Your Twitch password is entered only on Twitch. The app stores its rotating session encrypted for your Windows account.\r\n\r\n" +
+            "Your Twitch password stays on Twitch. The app encrypts the saved session for your Windows account. Twitch may require sign-in again after 30 days without use or if access is revoked.\r\n\r\n" +
             "Official guide: https://dev.twitch.tv/docs/authentication/getting-tokens-oauth/";
         try
         {
             Clipboard.SetText(guide);
-            LoginStatus.Text = "Setup instructions copied to clipboard";
+            LoginStatus.Text = "Twitch sign-in guide copied to clipboard";
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Could not copy the setup instructions:\n{ex.Message}", "Twitch login setup", MessageBoxButton.OK, MessageBoxImage.Warning);
+            MessageBox.Show(this, $"Could not copy the sign-in guide:\n{ex.Message}", "Twitch sign-in", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
     private async void Logout_Click(object sender, RoutedEventArgs e)
