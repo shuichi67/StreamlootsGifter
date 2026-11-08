@@ -26,9 +26,6 @@ then uncomment and update this line:
 - The current build also retains the optional Free Chest Hour feature.
 - Choose English or Spanish Streamloots labels in Settings; the browser extension recognizes both languages.
 
-## Publishing updates
-
-The in-app updater requires both the GitHub SHA-256 digest and a publisher signature. The release builder uses the ignored local file `.update-signing-private.pem` to sign the update ZIP. Keep that private key backed up securely and never commit or upload it. Upload both `StreamlootsGifter-Update-...zip` and its matching `.zip.sig` file to the same GitHub release. The app has the corresponding public key pinned in its updater and refuses unsigned packages.
 
 ## What you need
 
