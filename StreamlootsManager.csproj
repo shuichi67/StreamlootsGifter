@@ -7,7 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>StreamlootsManager</RootNamespace>
     <AssemblyName>StreamlootsGifter</AssemblyName>
-    <Version>0.6.0</Version>
+    <Version>0.6.1</Version>
     <ApplicationIcon>Assets\StreamlootsGifter.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>

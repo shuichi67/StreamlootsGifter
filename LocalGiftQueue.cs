@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Threading.Channels;
 
 namespace StreamlootsManager;
 
@@ -17,15 +18,23 @@ public sealed class LocalGiftQueue : IAsyncDisposable
     private readonly List<QueueJob> _jobs;
     private readonly Dictionary<string, QueueJob> _jobsById = new(StringComparer.Ordinal);
     private readonly Dictionary<string, QueueJob> _jobsByRedemptionId = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Task> _durabilityByRedemptionId = new(StringComparer.Ordinal);
+    private readonly Queue<(QueueJob Job, string Version)> _pendingJobs = new();
+    private readonly PriorityQueue<QueueJob, long> _pendingDeadlines = new();
     private readonly HashSet<string> _historyNameSet = new(StringComparer.OrdinalIgnoreCase);
     private string[] _historyNames = Array.Empty<string>();
     private readonly SemaphoreSlim _clientSlots = new(16, 16);
     private readonly CancellationTokenSource _stop = new();
+    private readonly Channel<PersistenceCommand> _persistenceQueue = Channel.CreateUnbounded<PersistenceCommand>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
     private readonly Timer _pendingTimeoutTimer;
+    private Task _persistenceTask = Task.CompletedTask;
+    private long _queuedJournalSizeBytes;
     private DateTimeOffset? _lastExtensionActivity;
     private string _token = "";
     private TcpListener? _listener;
     private Task? _serverTask;
+
+    private sealed record PersistenceCommand(string? JobJson, string? SnapshotJson, TaskCompletionSource<bool> Completion);
 
     public string Token { get { lock (_gate) return _token; } }
     public DateTimeOffset? LastExtensionActivity
@@ -33,7 +42,7 @@ public sealed class LocalGiftQueue : IAsyncDisposable
         get { lock (_gate) return _lastExtensionActivity; }
     }
     public event Action<QueueJob>? GiftUpdated;
-    public event Func<StreamlootsCardFeedEvent, StreamlootsCardFeedResult>? StreamlootsCardReceived;
+    public event Func<StreamlootsCardFeedEvent, Task<StreamlootsCardFeedResult>>? StreamlootsCardReceived;
     public Func<string[]>? StreamlootsCardRuleNamesProvider { get; set; }
     public Func<string>? StreamlootsLanguageProvider { get; set; }
 
@@ -59,9 +68,12 @@ public sealed class LocalGiftQueue : IAsyncDisposable
             job.Detail = "The app stopped during this gift. Verify Streamloots before retrying.";
             changed = true;
         }
+        foreach (var job in _jobs.Where(j => j.Status == "pending")) TrackPendingLocked(job);
         if (changed || File.Exists(_journalPath)) SaveLocked();
-        _pendingTimeoutTimer = new Timer(_ => ExpireStalePending(), null, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10));
-        ExpireStalePending();
+        _queuedJournalSizeBytes = File.Exists(_journalPath) ? new FileInfo(_journalPath).Length : 0;
+        _persistenceTask = Task.Run(RunPersistenceWorkerAsync);
+        _pendingTimeoutTimer = new Timer(_ => _ = ExpireStalePendingAsync(), null, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10));
+        _ = ExpireStalePendingAsync();
     }
 
     public void Start()
@@ -86,7 +98,9 @@ public sealed class LocalGiftQueue : IAsyncDisposable
         }
     }
 
-    public (string Status, string Detail) Enqueue(GiftRequest request)
+    public (string Status, string Detail) Enqueue(GiftRequest request) => EnqueueAsync(request).GetAwaiter().GetResult();
+
+    public async Task<(string Status, string Detail)> EnqueueAsync(GiftRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.RedemptionId)) return ("blocked", "Missing redemption ID.");
         if (string.IsNullOrWhiteSpace(request.Recipient))
@@ -94,34 +108,68 @@ public sealed class LocalGiftQueue : IAsyncDisposable
         if (string.IsNullOrWhiteSpace(request.Collection))
             return ("blocked", request.Source == "streamloots_card" ? "Assign a collection to this Streamloots card rule." : "Assign a collection to this Twitch reward.");
 
-        QueueJob job;
+        QueueJob? job = null;
+        Task? persistence = null;
+        Task? existingPersistence = null;
+        string? existingStatus = null;
         lock (_gate)
         {
             if (_jobsByRedemptionId.TryGetValue(request.RedemptionId, out var existing))
             {
-                return (existing.Status, "This redemption was already queued.");
+                existingStatus = existing.Status;
+                _durabilityByRedemptionId.TryGetValue(request.RedemptionId, out existingPersistence);
             }
-            job = new QueueJob
+            else
             {
-                JobId = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant(),
-                RedemptionId = request.RedemptionId,
-                Recipient = request.Recipient.Trim(),
-                Viewer = request.Viewer.Trim(),
-                Source = request.Source,
-                Keyword = request.Keyword,
-                Collection = request.Collection.Trim(),
-                Packs = Math.Clamp(request.Packs, 1, 50),
-                Cards = Math.Clamp(request.Cards, 1, 3),
-                Status = "pending",
-                CreatedAt = DateTimeOffset.Now.ToString("O"),
-                PlayedAt = request.PlayedAt
-            };
-            _jobs.Add(job);
-            _jobsById[job.JobId] = job;
-            _jobsByRedemptionId[job.RedemptionId] = job;
-            var namesChanged = AddHistoryNameLocked(job.Viewer) | AddHistoryNameLocked(job.Recipient);
-            if (namesChanged) SortHistoryNamesLocked();
-            SaveJobLocked(job);
+                job = new QueueJob
+                {
+                    JobId = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant(),
+                    RedemptionId = request.RedemptionId,
+                    Recipient = request.Recipient.Trim(),
+                    Viewer = request.Viewer.Trim(),
+                    Source = request.Source,
+                    Keyword = request.Keyword,
+                    Collection = request.Collection.Trim(),
+                    Packs = Math.Clamp(request.Packs, 1, 50),
+                    Cards = Math.Clamp(request.Cards, 1, 3),
+                    Status = "pending",
+                    CreatedAt = DateTimeOffset.Now.ToString("O"),
+                    PlayedAt = request.PlayedAt
+                };
+                _jobs.Add(job);
+                _jobsById[job.JobId] = job;
+                _jobsByRedemptionId[job.RedemptionId] = job;
+                var namesChanged = AddHistoryNameLocked(job.Viewer) | AddHistoryNameLocked(job.Recipient);
+                if (namesChanged) SortHistoryNamesLocked();
+                persistence = SaveJobLocked(job);
+                _durabilityByRedemptionId[job.RedemptionId] = persistence;
+            }
+        }
+        if (job is null)
+        {
+            if (existingPersistence is not null) await existingPersistence.ConfigureAwait(false);
+            lock (_gate)
+                if (_jobsByRedemptionId.TryGetValue(request.RedemptionId, out var existing)) existingStatus = existing.Status;
+            return (existingStatus ?? "pending", "This redemption was already queued.");
+        }
+        try { await persistence!.ConfigureAwait(false); }
+        catch
+        {
+            lock (_gate)
+            {
+                _jobs.Remove(job);
+                _jobsById.Remove(job.JobId);
+                _jobsByRedemptionId.Remove(job.RedemptionId);
+                _durabilityByRedemptionId.Remove(job.RedemptionId);
+                RebuildHistoryNamesLocked();
+            }
+            throw;
+        }
+        lock (_gate)
+        {
+            _durabilityByRedemptionId.Remove(job.RedemptionId);
+            if (job.Status == "pending" && _jobsById.TryGetValue(job.JobId, out var savedJob) && ReferenceEquals(savedJob, job))
+                TrackPendingLocked(job);
         }
         GiftUpdated?.Invoke(job);
         return ("pending", "Queued for Streamloots.");
@@ -187,11 +235,16 @@ public sealed class LocalGiftQueue : IAsyncDisposable
         }
     }
 
-    public int DeleteHistory(string? username = null, string? source = null, string? status = null, DateTimeOffset? olderThan = null)
+    public int DeleteHistory(string? username = null, string? source = null, string? status = null, DateTimeOffset? olderThan = null) =>
+        DeleteHistoryAsync(username, source, status, olderThan).GetAwaiter().GetResult();
+
+    public async Task<int> DeleteHistoryAsync(string? username = null, string? source = null, string? status = null, DateTimeOffset? olderThan = null)
     {
+        Task? persistence = null;
+        var removed = 0;
         lock (_gate)
         {
-            var removed = _jobs.RemoveAll(job =>
+            removed = _jobs.RemoveAll(job =>
                 (string.IsNullOrWhiteSpace(username) ||
                     job.Viewer.Contains(username, StringComparison.OrdinalIgnoreCase) ||
                     job.Recipient.Contains(username, StringComparison.OrdinalIgnoreCase)) &&
@@ -207,52 +260,75 @@ public sealed class LocalGiftQueue : IAsyncDisposable
                     if (!string.IsNullOrWhiteSpace(job.JobId)) _jobsById[job.JobId] = job;
                     if (!string.IsNullOrWhiteSpace(job.RedemptionId)) _jobsByRedemptionId[job.RedemptionId] = job;
                 }
+                _pendingJobs.Clear();
+                _pendingDeadlines.Clear();
+                foreach (var job in _jobs.Where(job => job.Status == "pending")) TrackPendingLocked(job);
                 RebuildHistoryNamesLocked();
-                SaveLocked();
+                persistence = QueueSnapshotPersistLocked();
             }
-            return removed;
         }
+        if (persistence is not null) await persistence.ConfigureAwait(false);
+        return removed;
     }
 
-    public QueueJob? ClaimNext()
+    public QueueJob? ClaimNext() => ClaimNextAsync().GetAwaiter().GetResult();
+
+    public async Task<QueueJob?> ClaimNextAsync()
     {
-        ExpireStalePending();
+        await ExpireStalePendingAsync().ConfigureAwait(false);
         QueueJob? claimed;
+        Task persistence;
         lock (_gate)
         {
-            var job = _jobs.FirstOrDefault(j => j.Status == "pending");
+            QueueJob? job = null;
+            while (_pendingJobs.TryDequeue(out var pending))
+            {
+                if (pending.Job.Status != "pending" || pending.Version != PendingVersion(pending.Job)) continue;
+                job = pending.Job;
+                break;
+            }
             if (job is null) return null;
             job.Status = "processing";
-            SaveJobLocked(job);
+            persistence = SaveJobLocked(job);
             claimed = Clone(job);
         }
+        await persistence.ConfigureAwait(false);
         GiftUpdated?.Invoke(claimed);
         return claimed;
     }
 
-    private void ExpireStalePending()
+    private async Task ExpireStalePendingAsync()
     {
         List<QueueJob> expired = [];
+        List<Task> persistenceTasks = [];
         var now = DateTimeOffset.UtcNow;
         lock (_gate)
         {
-            foreach (var job in _jobs.Where(job => job.Status == "pending"))
+            while (_pendingDeadlines.TryPeek(out var job, out var deadlineTicks) && deadlineTicks <= now.UtcTicks)
             {
-                var queuedAtText = string.IsNullOrWhiteSpace(job.UpdatedAt) ? job.CreatedAt : job.UpdatedAt;
-                if (!DateTimeOffset.TryParse(queuedAtText, out var queuedAt) || now - queuedAt < TimeSpan.FromMinutes(5)) continue;
+                _pendingDeadlines.Dequeue();
+                if (job.Status != "pending" || PendingDeadlineTicks(job) != deadlineTicks) continue;
                 job.Status = "needs_attention";
                 job.Detail = "This gift stayed queued for over 5 minutes. Keep the Streamloots Activity Feed open and retry when the gift form is available.";
                 job.UpdatedAt = now.ToString("O");
                 expired.Add(Clone(job));
+                persistenceTasks.Add(SaveJobLocked(job));
             }
-            foreach (var job in expired) SaveJobLocked(job);
+        }
+        if (persistenceTasks.Count > 0)
+        {
+            try { await Task.WhenAll(persistenceTasks).ConfigureAwait(false); }
+            catch (Exception) { /* Keep the timer callback from surfacing an unobserved persistence exception. */ }
         }
         foreach (var job in expired) GiftUpdated?.Invoke(job);
     }
 
-    public QueueJob? Complete(string jobId, string result, string detail)
+    public QueueJob? Complete(string jobId, string result, string detail) => CompleteAsync(jobId, result, detail).GetAwaiter().GetResult();
+
+    public async Task<QueueJob?> CompleteAsync(string jobId, string result, string detail)
     {
         QueueJob? updated;
+        Task persistence;
         lock (_gate)
         {
             var job = _jobsById.GetValueOrDefault(jobId);
@@ -266,16 +342,20 @@ public sealed class LocalGiftQueue : IAsyncDisposable
             };
             job.Detail = detail.Length > 500 ? detail[..500] : detail;
             job.UpdatedAt = DateTimeOffset.Now.ToString("O");
-            SaveJobLocked(job);
+            persistence = SaveJobLocked(job);
             updated = Clone(job);
         }
+        await persistence.ConfigureAwait(false);
         GiftUpdated?.Invoke(updated);
         return updated;
     }
 
-    public QueueJob? Retry(string jobId)
+    public QueueJob? Retry(string jobId) => RetryAsync(jobId).GetAwaiter().GetResult();
+
+    public async Task<QueueJob?> RetryAsync(string jobId)
     {
         QueueJob? updated;
+        Task persistence;
         lock (_gate)
         {
             var job = _jobsById.GetValueOrDefault(jobId);
@@ -288,16 +368,23 @@ public sealed class LocalGiftQueue : IAsyncDisposable
                 : $"Manual retry queued. Previous issue: {previousDetail}";
             if (job.Detail.Length > 500) job.Detail = job.Detail[..500];
             job.UpdatedAt = DateTimeOffset.Now.ToString("O");
-            SaveJobLocked(job);
+            persistence = SaveJobLocked(job);
             updated = Clone(job);
         }
+        await persistence.ConfigureAwait(false);
+        lock (_gate)
+            if (updated.Status == "pending" && _jobsById.TryGetValue(updated.JobId, out var pendingJob) && pendingJob.Status == "pending")
+                TrackPendingLocked(pendingJob);
         GiftUpdated?.Invoke(updated);
         return updated;
     }
 
-    public QueueJob? MarkAsSent(string jobId)
+    public QueueJob? MarkAsSent(string jobId) => MarkAsSentAsync(jobId).GetAwaiter().GetResult();
+
+    public async Task<QueueJob?> MarkAsSentAsync(string jobId)
     {
         QueueJob? updated;
+        Task persistence;
         lock (_gate)
         {
             var job = _jobsById.GetValueOrDefault(jobId);
@@ -306,9 +393,10 @@ public sealed class LocalGiftQueue : IAsyncDisposable
             job.Status = "sent";
             job.Detail = "Marked as gifted after verifying the Streamloots result.";
             job.UpdatedAt = DateTimeOffset.Now.ToString("O");
-            SaveJobLocked(job);
+            persistence = SaveJobLocked(job);
             updated = Clone(job);
         }
+        await persistence.ConfigureAwait(false);
         GiftUpdated?.Invoke(updated);
         return updated;
     }
@@ -404,7 +492,7 @@ public sealed class LocalGiftQueue : IAsyncDisposable
         lock (_gate) _lastExtensionActivity = DateTimeOffset.UtcNow;
         if (method == "GET" && path == "/next")
         {
-            await WriteJsonAsync(stream, 200, new { job = ClaimNext() }, cancellationToken, extensionOrigin);
+            await WriteJsonAsync(stream, 200, new { job = await ClaimNextAsync().ConfigureAwait(false) }, cancellationToken, extensionOrigin);
             return;
         }
         if (method == "GET" && path == "/card-rules")
@@ -449,8 +537,10 @@ public sealed class LocalGiftQueue : IAsyncDisposable
                 return;
             }
             lock (_gate) _lastExtensionActivity = DateTimeOffset.UtcNow;
-            var outcome = StreamlootsCardReceived?.Invoke(new StreamlootsCardFeedEvent(eventId, cardName, redeemer, input, playedAt))
-                ?? new StreamlootsCardFeedResult(false, "The app is not handling Streamloots card events.");
+            var handler = StreamlootsCardReceived;
+            var outcome = handler is null
+                ? new StreamlootsCardFeedResult(false, "The app is not handling Streamloots card events.")
+                : await handler(new StreamlootsCardFeedEvent(eventId, cardName, redeemer, input, playedAt)).ConfigureAwait(false);
             if (!outcome.Accepted)
             {
                 await WriteJsonAsync(stream, 422, new { accepted = false, error = outcome.Message }, cancellationToken, extensionOrigin);
@@ -462,7 +552,7 @@ public sealed class LocalGiftQueue : IAsyncDisposable
         var jobId = root.TryGetProperty("job_id", out var jobIdNode) ? jobIdNode.GetString() ?? "" : "";
         var result = root.TryGetProperty("result", out var resultNode) ? resultNode.GetString() ?? "needs_attention" : "needs_attention";
         var detail = root.TryGetProperty("detail", out var detailNode) ? detailNode.GetString() ?? "" : "";
-        var completed = Complete(jobId, result, detail);
+        var completed = await CompleteAsync(jobId, result, detail).ConfigureAwait(false);
         if (completed is null) await WriteJsonAsync(stream, 404, new { error = "Job not found" }, cancellationToken, extensionOrigin);
         else await WriteJsonAsync(stream, 200, new { ok = true }, cancellationToken, extensionOrigin);
     }
@@ -581,21 +671,78 @@ public sealed class LocalGiftQueue : IAsyncDisposable
         SortHistoryNamesLocked();
     }
 
-    private void SaveJobLocked(QueueJob job)
+    private void TrackPendingLocked(QueueJob job)
+    {
+        _pendingJobs.Enqueue((job, PendingVersion(job)));
+        var deadlineTicks = PendingDeadlineTicks(job);
+        if (deadlineTicks.HasValue) _pendingDeadlines.Enqueue(job, deadlineTicks.Value);
+    }
+
+    private static string PendingVersion(QueueJob job) => string.IsNullOrWhiteSpace(job.UpdatedAt) ? job.CreatedAt : job.UpdatedAt;
+
+    private static long? PendingDeadlineTicks(QueueJob job)
+    {
+        var queuedAtText = string.IsNullOrWhiteSpace(job.UpdatedAt) ? job.CreatedAt : job.UpdatedAt;
+        return DateTimeOffset.TryParse(queuedAtText, out var queuedAt)
+            ? queuedAt.AddMinutes(5).UtcTicks
+            : null;
+    }
+
+    private Task SaveJobLocked(QueueJob job)
     {
         var json = JsonSerializer.Serialize(job);
-        bool shouldCompact;
-        using (var stream = new FileStream(_journalPath, FileMode.Append, FileAccess.Write, FileShare.Read, 4096, FileOptions.WriteThrough))
+        var lineSize = Encoding.UTF8.GetByteCount(json) + 2;
+        var compactAfterAppend = _queuedJournalSizeBytes + lineSize >= 8L * 1024 * 1024;
+        var snapshotJson = compactAfterAppend ? JsonSerializer.Serialize(_jobs) : null;
+        _queuedJournalSizeBytes = compactAfterAppend ? 0 : _queuedJournalSizeBytes + lineSize;
+        return QueuePersistenceLocked(json, snapshotJson);
+    }
+
+    private Task QueueSnapshotPersistLocked()
+    {
+        _queuedJournalSizeBytes = 0;
+        return QueuePersistenceLocked(null, JsonSerializer.Serialize(_jobs));
+    }
+
+    private Task QueuePersistenceLocked(string? jobJson, string? snapshotJson)
+    {
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_persistenceQueue.Writer.TryWrite(new PersistenceCommand(jobJson, snapshotJson, completion)))
+            completion.TrySetException(new IOException("The history persistence worker is not available."));
+        return completion.Task;
+    }
+
+    private async Task RunPersistenceWorkerAsync()
+    {
+        await foreach (var command in _persistenceQueue.Reader.ReadAllAsync().ConfigureAwait(false))
         {
-            using (var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false), 1024, leaveOpen: true))
+            try
             {
-                writer.WriteLine(json);
-                writer.Flush();
+                if (command.JobJson is not null)
+                {
+                    var bytes = Encoding.UTF8.GetBytes(command.JobJson + "\r\n");
+                    await using var stream = new FileStream(_journalPath, FileMode.Append, FileAccess.Write, FileShare.Read, 4096,
+                        FileOptions.Asynchronous | FileOptions.WriteThrough);
+                    await stream.WriteAsync(bytes).ConfigureAwait(false);
+                    await stream.FlushAsync().ConfigureAwait(false);
+                    stream.Flush(flushToDisk: true);
+                }
+                if (command.SnapshotJson is not null)
+                {
+                    var temporaryPath = _queuePath + ".tmp";
+                    await File.WriteAllTextAsync(temporaryPath, command.SnapshotJson).ConfigureAwait(false);
+                    File.Move(temporaryPath, _queuePath, true);
+                    if (File.Exists(_journalPath)) File.Delete(_journalPath);
+                }
+                command.Completion.TrySetResult(true);
             }
-            stream.Flush(flushToDisk: true);
-            shouldCompact = stream.Length >= 8L * 1024 * 1024;
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                lock (_gate)
+                    _queuedJournalSizeBytes = File.Exists(_journalPath) ? new FileInfo(_journalPath).Length : 0;
+                command.Completion.TrySetException(ex);
+            }
         }
-        if (shouldCompact) SaveLocked();
     }
 
     private static QueueJob Clone(QueueJob job) => new()
@@ -625,6 +772,8 @@ public sealed class LocalGiftQueue : IAsyncDisposable
         {
             try { await _serverTask.ConfigureAwait(false); } catch (OperationCanceledException) { }
         }
+        _persistenceQueue.Writer.TryComplete();
+        await _persistenceTask.ConfigureAwait(false);
         _stop.Dispose();
     }
 }

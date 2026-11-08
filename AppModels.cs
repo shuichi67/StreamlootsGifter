@@ -140,6 +140,7 @@ public sealed record ChatMessageEvent(string ChatterId, string Login, string Dis
 
 public sealed class GiftActivity
 {
+    public string RedemptionId { get; init; } = "";
     public string JobId { get; set; } = "";
     public string Viewer { get; init; } = "";
     public string Reward { get; init; } = "";

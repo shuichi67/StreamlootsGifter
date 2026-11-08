@@ -94,6 +94,7 @@ public partial class MainWindow : Window
     private string? _activeWindowId;
     private DateTimeOffset? _freeChestUntil;
     private IReadOnlyList<FreeChestRule> _activeRules = [];
+    private Dictionary<string, FreeChestRule> _activeRuleMap = new(StringComparer.OrdinalIgnoreCase);
     private TextBlock? _freeChestStatus;
     private TextBlock? _freeChestChatActivity;
     private TextBlock? _freeChestCountdown;
@@ -138,7 +139,14 @@ public partial class MainWindow : Window
     private IReadOnlyList<string> _activityNameSuggestions = [];
     private ToggleButton? _showHiddenRewards;
     private StackPanel? _historyList;
+    private readonly Dictionary<string, Border> _historyRowsByJobId = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Border> _activityRowsByRedemptionId = new(StringComparer.Ordinal);
     private int _historyVisibleLimit = 200;
+    private const int HistoryPageSize = 200;
+    private Button? _historyShowMoreButton;
+    private bool _giftUiRefreshScheduled;
+    private bool _activityUiDirty;
+    private bool _historyUiDirty;
     private StackPanel? _activityList;
     private StackPanel? _streamlootsCardRulesList;
     private FrameworkElement? _historyFiltersPanel;
@@ -184,6 +192,7 @@ public partial class MainWindow : Window
     private Button? _cancelStreamlootsCardRuleEditButton;
     private StreamlootsCardRule? _editingStreamlootsCardRule;
     private TextBlock? _bridgeStatus;
+    private TextBlock? _bridgeCompactStatus;
     private Ellipse? _bridgeStatusDot;
     private TextBox? _bridgeKeyBox;
     private Button? _bridgeRevealButton;
@@ -238,7 +247,7 @@ public partial class MainWindow : Window
         _freeChestTimer.Tick += (_, _) => UpdateFreeChestTimer();
         _bridgeTimer.Tick += (_, _) => UpdateBridgeStatus();
         _giftQueue.GiftUpdated += job => Dispatcher.InvokeAsync(() => OnGiftUpdated(job));
-        _giftQueue.StreamlootsCardReceived += cardEvent => Dispatcher.Invoke(() => HandleStreamlootsCardRedeemed(cardEvent));
+        _giftQueue.StreamlootsCardReceived += cardEvent => Dispatcher.InvokeAsync(() => HandleStreamlootsCardRedeemedAsync(cardEvent)).Task.Unwrap();
         _twitch.StatusChanged += status => Dispatcher.InvokeAsync(() =>
         {
             ConnectionStatus.Text = status;
@@ -265,6 +274,11 @@ public partial class MainWindow : Window
         });
         _twitch.RedemptionReceived += redemption => Dispatcher.InvokeAsync(() => HandleRedemption(redemption));
         _twitch.ChatMessageReceived += message => Dispatcher.InvokeAsync(() => HandleChatMessage(message));
+        _twitch.ChatActivityReceived += () => Dispatcher.InvokeAsync(() =>
+        {
+            if (_freeChestUntil.HasValue && _freeChestChatActivity is not null)
+                _freeChestChatActivity.Text = $"Last chat message received · {DateTime.Now:HH:mm:ss}";
+        });
         Loaded += Window_Loaded;
         Closed += Window_Closed;
         ShowPage("dashboard");
@@ -2048,13 +2062,15 @@ public partial class MainWindow : Window
         layout.Children.Add(header);
 
         var steps = new StackPanel { Margin = new Thickness(20, 18, 20, 22) };
-        AddSetupStep(steps, "1", "Open the extension manager", $"In {browser}, open the extensions page using this link.");
-        AddSetupLink(steps, $"Open {browser} extensions", () => OpenBrowserExtensionPage(window, browser));
+        AddSetupStep(steps, "1", "Open the extension manager", $"Use the link below to copy the extensions address and open {browser}. Then press Ctrl+L, Ctrl+V, Enter in the browser.");
+        AddSetupLink(steps, $"Copy extensions address and open {browser}", () => OpenBrowserExtensionPage(window, browser));
         AddSetupStep(steps, "2", "Turn on Developer mode", "On the extensions page, enable Developer mode. This reveals the Load unpacked button.");
         AddSetupStep(steps, "3", "Load the extension folder", "Choose Load unpacked, then select the Streamloots Gifter extension folder.");
         AddSetupLink(steps, "Open Streamloots Gifter extension folder", () => OpenBrowserExtensionFolder(window));
         AddSetupStep(steps, "4", "Approve and pin", "Approve the requested permissions. Pin Streamloots Gifter from the browser’s extensions menu for quick access.");
-        AddSetupStep(steps, "5", "Connect it to the app", "In the app’s Streamloots Bridge widget, copy the bridge key. Open the extension, paste the key, and connect.");
+        AddSetupStep(steps, "5", "Keep Streamloots active", "Use the link below to copy the performance settings address and open the browser. Then press Ctrl+L, Ctrl+V, Enter. Add streamloots.com to ‘Always keep these sites active’ (or the browser’s equivalent). Keep the Activity Feed tab open while gifting.");
+        AddSetupLink(steps, $"Copy performance settings address and open {browser}", () => OpenBrowserPerformanceSettings(window, browser));
+        AddSetupStep(steps, "6", "Connect it to the app", "In the app’s Streamloots Bridge widget, copy the bridge key. Open the extension, paste the key, and connect.");
 
         var scroll = new ScrollViewer
         {
@@ -2088,12 +2104,42 @@ public partial class MainWindow : Window
             var executable = FindBrowserExecutable(browser);
             if (executable is null)
                 throw new InvalidOperationException($"Could not find {browser} on this computer. Install it first, then try again.");
-            Process.Start(new ProcessStartInfo(executable, $"\"{page}\"") { UseShellExecute = true });
+            OpenBrowserInternalPage(executable, page);
         }
         catch (Exception ex)
         {
             MessageBox.Show(owner, ex.Message, "Browser extension setup", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
+    }
+
+    private void OpenBrowserPerformanceSettings(Window owner, string browser)
+    {
+        try
+        {
+            var page = browser switch
+            {
+                "Brave" => "brave://settings/system",
+                "Microsoft Edge" => "edge://settings/system",
+                _ => "chrome://settings/performance"
+            };
+            var executable = FindBrowserExecutable(browser);
+            if (executable is null)
+                throw new InvalidOperationException($"Could not find {browser} on this computer. Install it first, then try again.");
+            OpenBrowserInternalPage(executable, page);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(owner, ex.Message, "Browser performance settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private static void OpenBrowserInternalPage(string executable, string page)
+    {
+        // Chromium rejects privileged browser pages supplied by an external process.
+        // The user must paste the address into the browser's own address bar.
+        Clipboard.SetText(page);
+        var startInfo = new ProcessStartInfo(executable) { UseShellExecute = false };
+        Process.Start(startInfo);
     }
 
     private void OpenBrowserExtensionFolder(Window owner)
@@ -2338,10 +2384,24 @@ public partial class MainWindow : Window
         heading.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         heading.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         AttachDragSource(heading, key, true);
-        var labels = new StackPanel();
+        var labels = new StackPanel
+        {
+            Orientation = key == "bridge" ? Orientation.Horizontal : Orientation.Vertical,
+            VerticalAlignment = VerticalAlignment.Center
+        };
         labels.VerticalAlignment = VerticalAlignment.Center;
         labels.Margin = new Thickness(14, 0, 0, 0);
         labels.Children.Add(new TextBlock { Text = title, FontSize = 16, FontWeight = FontWeights.Bold, Foreground = Brush("#F4F6FF") });
+        if (key == "bridge")
+        {
+            _bridgeCompactStatus = new TextBlock
+            {
+                Text = "● Inactive", FontSize = 12, FontWeight = FontWeights.SemiBold,
+                Foreground = Brush("#E5B94C"), VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(12, 1, 0, 0)
+            };
+            labels.Children.Add(_bridgeCompactStatus);
+        }
         Grid.SetColumn(labels, 0);
         heading.Children.Add(labels);
         var actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
@@ -2707,7 +2767,7 @@ public partial class MainWindow : Window
             _streamlootsCardRulesList.Children.Add(Label("No Streamloots card rules configured yet.", false, "#8491AA"));
     }
 
-    private StreamlootsCardFeedResult HandleStreamlootsCardRedeemed(StreamlootsCardFeedEvent cardEvent)
+    private async Task<StreamlootsCardFeedResult> HandleStreamlootsCardRedeemedAsync(StreamlootsCardFeedEvent cardEvent)
     {
         var normalizedCardName = NormalizeStreamlootsCardName(cardEvent.CardName);
         var rule = _config.StreamlootsCardRules.FirstOrDefault(item => NormalizeStreamlootsCardName(item.CardName).Equals(normalizedCardName, StringComparison.Ordinal));
@@ -2729,7 +2789,7 @@ public partial class MainWindow : Window
             rule.Chests,
             rule.Cards,
             cardEvent.PlayedAt);
-        var (status, detail) = QueueRequest(request, viewer, request.RewardName, recipient);
+        var (status, detail) = await QueueRequestAsync(request, viewer, request.RewardName, recipient);
         if (_streamlootsCardStatus is not null)
             _streamlootsCardStatus.Text = string.IsNullOrWhiteSpace(recipient)
                 ? rule.Action == "gift_user"
@@ -2809,12 +2869,21 @@ public partial class MainWindow : Window
             _bridgeStatus.Text = _bridgeError is null ? "Starting local Bridge…" : $"Bridge unavailable · {_bridgeError}";
             _bridgeStatus.Foreground = Brush(_bridgeError is null ? "#E5B94C" : "#FF8585");
             _bridgeStatusDot.Fill = Brush(_bridgeError is null ? "#E5B94C" : "#FF8585");
+            UpdateBridgeCompactStatus(_bridgeError is null ? "Inactive" : "Disconnected", _bridgeError is null ? "#E5B94C" : "#FF8585");
             return;
         }
         var extensionConnected = _giftQueue.LastExtensionActivity is { } lastSeen && DateTimeOffset.UtcNow - lastSeen < TimeSpan.FromSeconds(8);
         _bridgeStatus.Text = message ?? (extensionConnected ? "Streamloots extension connected" : "Bridge ready · waiting for extension");
         _bridgeStatus.Foreground = Brush(extensionConnected ? "#52DB91" : "#E5B94C");
         _bridgeStatusDot.Fill = Brush(extensionConnected ? "#35C979" : "#E5B94C");
+        UpdateBridgeCompactStatus(extensionConnected ? "Connected" : "Inactive", extensionConnected ? "#52DB91" : "#E5B94C");
+    }
+
+    private void UpdateBridgeCompactStatus(string status, string color)
+    {
+        if (_bridgeCompactStatus is null) return;
+        _bridgeCompactStatus.Text = $"● {status}";
+        _bridgeCompactStatus.Foreground = Brush(color);
     }
 
 
@@ -3114,7 +3183,11 @@ public partial class MainWindow : Window
         _activityStatusFilterButton.Content = caption;
     }
 
-    private void BuildDashboardGrid(string page) => BuildTreeDashboardGrid(page);
+    private void BuildDashboardGrid(string page)
+    {
+        BuildTreeDashboardGrid(page);
+        if (page == "dashboard") ScheduleGiftUiRefresh();
+    }
 
     private void BuildDashboardGrid_Legacy(string page)
     {
@@ -3905,6 +3978,7 @@ public partial class MainWindow : Window
         HeaderTitle.Text = isSettings ? "Settings" : "Dashboard";
         foreach (var key in _cards.Keys) UpdateCardActions(key);
         BuildDashboardGrid(_activePage);
+        if (_activePage == "dashboard") ScheduleGiftUiRefresh();
     }
 
     private void UpdateCardActions(string key)
@@ -4213,8 +4287,17 @@ public partial class MainWindow : Window
     private void RefreshActiveFreeChestRules()
     {
         if (_freeChestUntil.HasValue)
+        {
             _activeRules = _config.FreeChestRules.Where(rule => rule.Enabled).Select(CloneRule).ToArray();
+            _activeRuleMap = BuildActiveRuleMap(_activeRules);
+            _twitch.SetChatKeywordFilter(_activeRuleMap.Keys);
+        }
     }
+
+    private static Dictionary<string, FreeChestRule> BuildActiveRuleMap(IEnumerable<FreeChestRule> rules) => rules
+        .Where(rule => !string.IsNullOrWhiteSpace(rule.Keyword))
+        .GroupBy(rule => rule.Keyword.Trim(), StringComparer.OrdinalIgnoreCase)
+        .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
 
     private void RenderFreeChestRules(bool includeGuideExample = false)
     {
@@ -4311,6 +4394,8 @@ public partial class MainWindow : Window
         _activeWindowId = Guid.NewGuid().ToString("N");
         _freeChestUntil = DateTimeOffset.UtcNow.AddMinutes(durationMinutes);
         _activeRules = enabledRules;
+        _activeRuleMap = BuildActiveRuleMap(enabledRules);
+        _twitch.SetChatKeywordFilter(_activeRuleMap.Keys);
         _claimedViewers.Clear();
         _freeChestStatus!.Text = "Free Chest Hour is live · one claim per viewer";
         _freeChestStatus.Foreground = Brush("#35C979");
@@ -4328,6 +4413,8 @@ public partial class MainWindow : Window
         _freeChestUntil = null;
         _activeWindowId = null;
         _activeRules = [];
+        _activeRuleMap.Clear();
+        _twitch.SetChatKeywordFilter(Array.Empty<string>());
         _claimedViewers.Clear();
         _freeChestTimer.Stop();
         if (_freeChestStatus is not null)
@@ -4373,7 +4460,7 @@ public partial class MainWindow : Window
             _freeChestCompactCountdown.Visibility = isActive ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private void HandleRedemption(RedemptionEvent redemption)
+    private async void HandleRedemption(RedemptionEvent redemption)
     {
         if (!_config.RewardGiftOptions.TryGetValue(redemption.RewardId, out var configuredOption) || !configuredOption.Enabled)
             return;
@@ -4384,17 +4471,14 @@ public partial class MainWindow : Window
             : string.IsNullOrWhiteSpace(redemption.UserLogin) ? redemption.UserName.Trim() : redemption.UserLogin.Trim();
         var recipient = ResolveViewerAlias(enteredRecipient);
         var request = new GiftRequest(redemption.Id, redemption.UserName, recipient, collection, redemption.RewardTitle, Packs: option.Packs, Cards: option.Cards);
-        QueueRequest(request, redemption.UserName, redemption.RewardTitle, recipient);
+        await QueueRequestAsync(request, redemption.UserName, redemption.RewardTitle, recipient);
     }
 
-    private void HandleChatMessage(ChatMessageEvent message)
+    private async void HandleChatMessage(ChatMessageEvent message)
     {
-        if (_freeChestChatActivity is not null)
-            _freeChestChatActivity.Text = $"Last chat message received · {DateTime.Now:HH:mm:ss}";
         if (_freeChestUntil is null || DateTimeOffset.UtcNow >= _freeChestUntil || string.IsNullOrWhiteSpace(message.ChatterId) || string.IsNullOrWhiteSpace(message.Login)) return;
         var keyword = message.Text.Trim();
-        var rule = _activeRules.FirstOrDefault(r => r.Keyword.Equals(keyword, StringComparison.OrdinalIgnoreCase));
-        if (rule is null || !_claimedViewers.Add(message.ChatterId)) return;
+        if (!_activeRuleMap.TryGetValue(keyword, out var rule) || !_claimedViewers.Add(message.ChatterId)) return;
         var request = new GiftRequest(
             $"free-chest:{_activeWindowId}:{message.ChatterId}",
             message.DisplayName,
@@ -4405,15 +4489,27 @@ public partial class MainWindow : Window
             rule.Keyword,
             rule.Packs,
             rule.Cards);
-        QueueRequest(request, message.DisplayName, request.RewardName, message.Login);
+        await QueueRequestAsync(request, message.DisplayName, request.RewardName, message.Login);
     }
 
-    private (string Status, string Detail) QueueRequest(GiftRequest request, string viewer, string reward, string recipient)
+    private async Task<(string Status, string Detail)> QueueRequestAsync(GiftRequest request, string viewer, string reward, string recipient)
     {
-        var (status, detail) = _giftQueue.Enqueue(request);
+        string status;
+        string detail;
+        try
+        {
+            (status, detail) = await _giftQueue.EnqueueAsync(request);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            status = "blocked";
+            detail = $"Could not durably save this gift to history: {ex.Message}";
+        }
         if (detail == "This redemption was already queued.") return (status, detail);
+        var queuedJob = status == "pending" ? _giftQueue.FindByRedemptionId(request.RedemptionId) : null;
         var activity = new GiftActivity
         {
+            RedemptionId = request.RedemptionId,
             Viewer = viewer,
             Reward = reward,
             Recipient = recipient,
@@ -4422,10 +4518,12 @@ public partial class MainWindow : Window
             Keyword = request.Keyword,
             Packs = request.Packs,
             Cards = request.Cards,
-            Status = status == "pending" ? "Gift queued for Streamloots" : $"Gift not queued: {detail}",
-            Detail = detail
+            Status = status == "pending"
+                ? queuedJob?.Status == "processing" ? "Sending gift…" : "Gift queued for Streamloots"
+                : $"Gift not queued: {detail}",
+            Detail = queuedJob?.Detail ?? detail
         };
-        activity.JobId = _giftQueue.FindByRedemptionId(request.RedemptionId)?.JobId ?? "";
+        activity.JobId = queuedJob?.JobId ?? "";
         _activityById[request.RedemptionId] = activity;
         _activity.Insert(0, activity);
         if (_activity.Count > 200)
@@ -4437,13 +4535,71 @@ public partial class MainWindow : Window
         }
         RefreshHistoryNameSuggestions();
         RefreshActivityNameSuggestions();
-        RenderActivity();
-        RenderHistory();
+        if (!TryInsertActivityRow(activity)) _activityUiDirty = true;
+        if (status == "pending" && !TryInsertHistoryRow(queuedJob)) _historyUiDirty = true;
+        ScheduleGiftUiRefresh();
         return (status, detail);
+    }
+
+    private bool TryInsertHistoryRow(QueueJob? job)
+    {
+        if (job is null) return false;
+        if (_activePage != "dashboard" || _historyList is null ||
+            !_cards.TryGetValue("free_chest_history", out var card) || !card.IsVisible) return false;
+        if (!HistoryMatchesCurrentFilters(job)) return true;
+        if (_historyRowsByJobId.TryGetValue(job.JobId, out var existingRow))
+        {
+            existingRow.Child = CreateHistoryRowContent(job);
+            return true;
+        }
+
+        var row = CreateHistoryRow(job);
+        if (_historyRowsByJobId.Count == 0) _historyList.Children.Clear();
+        var insertionIndex = _historyShowMoreButton is null ? 0 : _historyList.Children.IndexOf(_historyShowMoreButton);
+        _historyList.Children.Insert(Math.Max(0, insertionIndex), row);
+        _historyRowsByJobId[job.JobId] = row;
+        _historyFirstRow = row;
+        while (_historyRowsByJobId.Count > _historyVisibleLimit)
+        {
+            var lastRow = _historyRowsByJobId.Values.FirstOrDefault(candidate => _historyList.Children.IndexOf(candidate) == _historyList.Children.Count - (_historyShowMoreButton is null ? 1 : 2));
+            if (lastRow is null) break;
+            _historyList.Children.Remove(lastRow);
+            _historyRowsByJobId.Remove(_historyRowsByJobId.First(pair => ReferenceEquals(pair.Value, lastRow)).Key);
+        }
+        return true;
+    }
+
+    private bool TryInsertActivityRow(GiftActivity item)
+    {
+        if (_activePage != "dashboard" || _activityList is null ||
+            !_cards.TryGetValue("activity", out var card) || !card.IsVisible) return false;
+        if (!ActivityMatchesCurrentFilters(item)) return true;
+        if (_activityRowsByRedemptionId.TryGetValue(item.RedemptionId, out var existingRow))
+        {
+            existingRow.Child = CreateActivityRowContent(item);
+            return true;
+        }
+
+        if (_activityRowsByRedemptionId.Count == 0) _activityList.Children.Clear();
+        var row = CreateActivityRow(item);
+        _activityList.Children.Insert(0, row);
+        _activityRowsByRedemptionId[item.RedemptionId] = row;
+        while (_activityRowsByRedemptionId.Count > 100)
+        {
+            var lastRow = _activityList.Children.OfType<Border>().LastOrDefault();
+            if (lastRow is null) break;
+            _activityList.Children.Remove(lastRow);
+            var lastKey = _activityRowsByRedemptionId.First(pair => ReferenceEquals(pair.Value, lastRow)).Key;
+            _activityRowsByRedemptionId.Remove(lastKey);
+        }
+        return true;
     }
 
     private void OnGiftUpdated(QueueJob job)
     {
+        if (job.Status == "pending" && !_activityById.ContainsKey(job.RedemptionId))
+            return; // QueueRequestAsync inserts newly queued rows after durable persistence completes.
+
         if (_activityById.TryGetValue(job.RedemptionId, out var activity))
         {
             activity.JobId = job.JobId;
@@ -4456,16 +4612,90 @@ public partial class MainWindow : Window
                 _ => "Gift needs attention"
             };
             activity.Detail = job.Detail;
-            RenderActivity();
+            var activityMatches = ActivityMatchesCurrentFilters(activity);
+            if (_activityRowsByRedemptionId.TryGetValue(job.RedemptionId, out var activityRow) && activityMatches)
+                activityRow.Child = CreateActivityRowContent(activity);
+            else if (activityMatches || _activityRowsByRedemptionId.ContainsKey(job.RedemptionId))
+                _activityUiDirty = true;
         }
-        RenderHistory();
+        var historyMatches = HistoryMatchesCurrentFilters(job);
+        if (_historyRowsByJobId.TryGetValue(job.JobId, out var historyRow) && historyMatches)
+            historyRow.Child = CreateHistoryRowContent(job);
+        else if (historyMatches || _historyRowsByJobId.ContainsKey(job.JobId))
+            _historyUiDirty = true;
+        ScheduleGiftUiRefresh();
+    }
+
+    private bool ActivityMatchesCurrentFilters(GiftActivity item)
+    {
+        var sourceFilter = _activitySourceFilter?.SelectedItem as string ?? _config.ActivitySourceFilter;
+        var username = (_activityUserFilter?.Text ?? _config.ActivityUserFilter).Trim();
+        return _config.ActivityStatusFilters.Contains(ActivityStatusLabel(item.Status), StringComparer.Ordinal) &&
+            (sourceFilter == "All" || item.Source == SourceCode(sourceFilter)) &&
+            (username.Length == 0 || item.Viewer.Contains(username, StringComparison.OrdinalIgnoreCase) || item.Recipient.Contains(username, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private bool HistoryMatchesCurrentFilters(QueueJob job)
+    {
+        var query = GetHistoryQuery();
+        return (query.Source is null || query.Source == job.Source) &&
+            (query.Statuses.Length == 0 || query.Statuses.Contains(job.Status, StringComparer.Ordinal)) &&
+            (query.Username.Length == 0 || job.Viewer.Contains(query.Username, StringComparison.OrdinalIgnoreCase) || job.Recipient.Contains(query.Username, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void ScheduleGiftUiRefresh()
+    {
+        if (_giftUiRefreshScheduled) return;
+        _giftUiRefreshScheduled = true;
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+        {
+            _giftUiRefreshScheduled = false;
+            if (_activePage != "dashboard") return;
+            if (_activityUiDirty && _cards.TryGetValue("activity", out var activityCard) && activityCard.IsVisible)
+            {
+                RenderActivity();
+                _activityUiDirty = false;
+            }
+            if (_historyUiDirty && _cards.TryGetValue("free_chest_history", out var historyCard) && historyCard.IsVisible)
+            {
+                RenderHistory();
+                _historyUiDirty = false;
+            }
+        }));
     }
 
     private void RenderHistory()
     {
         if (_historyList is null) return;
         _historyList.Children.Clear();
+        _historyRowsByJobId.Clear();
         _historyFirstRow = null;
+        _historyShowMoreButton = null;
+        var query = GetHistoryQuery();
+        var offset = 0;
+        var hasMore = false;
+        do
+        {
+            var take = Math.Min(HistoryPageSize, Math.Max(1, _historyVisibleLimit - offset));
+            var page = _giftQueue.HistoryPage(query.Source, query.Statuses, query.Username, offset, take);
+            foreach (var job in page.Jobs) AppendHistoryRow(job);
+            offset += page.Jobs.Count;
+            hasMore = page.HasMore;
+            if (page.Jobs.Count == 0 || !hasMore) break;
+        } while (offset < _historyVisibleLimit);
+
+        if (offset == 0)
+        {
+            var empty = Label("No claims match this filter yet.", false, "#8491AA");
+            empty.HorizontalAlignment = HorizontalAlignment.Left;
+            _historyList.Children.Add(empty);
+            _historyFirstRow = empty;
+        }
+        if (hasMore) AddHistoryShowMoreButton();
+    }
+
+    private (string? Source, string[] Statuses, string Username) GetHistoryQuery()
+    {
         var selected = _historyFilter?.SelectedItem as string ?? _config.HistoryFilter;
         var sourceFilter = _historySourceFilter?.SelectedItem as string ?? _config.ClaimHistorySourceFilter;
         var username = (_historyUserFilter?.Text ?? _config.ClaimHistoryUserFilter).Trim();
@@ -4478,75 +4708,92 @@ public partial class MainWindow : Window
             "Sending" => new[] { "processing" },
             _ => Array.Empty<string>()
         };
-        var page = _giftQueue.HistoryPage(
-            sourceFilter == "All" ? null : SourceCode(sourceFilter),
-            statuses,
-            username,
-            0,
-            _historyVisibleLimit);
-        if (page.Jobs.Count == 0)
+        return (sourceFilter == "All" ? null : SourceCode(sourceFilter), statuses, username);
+    }
+
+    private void AppendHistoryRow(QueueJob job)
+    {
+        if (_historyList is null) return;
+        var row = CreateHistoryRow(job);
+        _historyList.Children.Add(row);
+        _historyRowsByJobId[job.JobId] = row;
+        _historyFirstRow ??= row;
+    }
+
+    private Border CreateHistoryRow(QueueJob job) => new()
+    {
+        Background = Brush("#10182A"), BorderBrush = Brush("#26324A"), BorderThickness = new Thickness(0, 0, 0, 1),
+        CornerRadius = new CornerRadius(7), Padding = new Thickness(9, 6, 9, 6), Margin = new Thickness(0, 4, 0, 4),
+        Child = CreateHistoryRowContent(job)
+    };
+
+    private UIElement CreateHistoryRowContent(QueueJob job)
+    {
+        var content = new StackPanel();
+        var top = new DockPanel { Margin = new Thickness(0, 0, 0, 2) };
+        var status = Label(HistoryStatus(job.Status), true, HistoryColor(job.Status));
+        DockPanel.SetDock(status, Dock.Right);
+        top.Children.Add(status);
+        top.Children.Add(Label($"{job.Viewer}  ·  {GiftSourceLabel(job.Source)}", true));
+        content.Children.Add(top);
+        content.Children.Add(Label(
+            $"Recipient: {(string.IsNullOrWhiteSpace(job.Recipient) ? "Not provided" : job.Recipient)}",
+            false,
+            "#A5B0C6"));
+        var details = Label($"{job.Collection}  ·  {job.Packs} {ChestWord(job.Packs)} × {job.Cards} cards", false, "#A5B0C6");
+        details.Margin = new Thickness(0, 0, 0, 1);
+        content.Children.Add(details);
+        var footer = new DockPanel { Margin = new Thickness(0, 2, 0, 0), LastChildFill = true };
+        if (job.Status == "needs_attention")
         {
-            var empty = Label("No claims match this filter yet.", false, "#8491AA");
-            empty.HorizontalAlignment = HorizontalAlignment.Left;
-            _historyList.Children.Add(empty);
-            _historyFirstRow = empty;
-            return;
+            var actions = new StackPanel { Orientation = Orientation.Horizontal };
+            var markSent = MakeButton("Mark gifted", () => MarkGiftAsSent(job), "#174331");
+            markSent.Foreground = Brush("#52DB91");
+            markSent.Margin = new Thickness(6, 2, 0, 2);
+            markSent.Padding = new Thickness(8, 5, 8, 5);
+            markSent.ToolTip = "Use after confirming the gift was delivered in Streamloots.";
+            actions.Children.Add(markSent);
+            var retry = MakeButton("Retry", () => RetryGift(job), "#202B40");
+            retry.Foreground = Brush("#52DB91");
+            retry.Margin = new Thickness(6, 2, 0, 2);
+            retry.Padding = new Thickness(8, 5, 8, 5);
+            retry.ToolTip = "Queue another attempt if the gift was not delivered.";
+            actions.Children.Add(retry);
+            DockPanel.SetDock(actions, Dock.Right);
+            footer.Children.Add(actions);
         }
-        foreach (var job in page.Jobs)
+        var historyTime = job.Source == "streamloots_card" && !string.IsNullOrWhiteSpace(job.PlayedAt)
+            ? $"Card played · {FormatCardPlayedTime(job.PlayedAt)}"
+            : FormatTime(job.CreatedAt);
+        footer.Children.Add(Label(historyTime, false, "#7F8BA4"));
+        content.Children.Add(footer);
+        return content;
+    }
+
+    private void AddHistoryShowMoreButton()
+    {
+        if (_historyList is null || _historyShowMoreButton is not null) return;
+        var more = MakeButton("Show more claims", LoadMoreHistory, "#202B40");
+        more.HorizontalAlignment = HorizontalAlignment.Center;
+        more.Margin = new Thickness(0, 8, 0, 10);
+        _historyShowMoreButton = more;
+        _historyList.Children.Add(more);
+    }
+
+    private void LoadMoreHistory()
+    {
+        if (_historyList is null) return;
+        if (_historyShowMoreButton is not null)
         {
-            var content = new StackPanel();
-            var row = new Border { Background = Brush("#10182A"), BorderBrush = Brush("#26324A"), BorderThickness = new Thickness(0, 0, 0, 1), CornerRadius = new CornerRadius(7), Padding = new Thickness(9, 6, 9, 6), Margin = new Thickness(0, 4, 0, 4), Child = content };
-            var top = new DockPanel { Margin = new Thickness(0, 0, 0, 2) };
-            var status = Label(HistoryStatus(job.Status), true, HistoryColor(job.Status));
-            DockPanel.SetDock(status, Dock.Right);
-            top.Children.Add(status);
-            top.Children.Add(Label($"{job.Viewer}  ·  {GiftSourceLabel(job.Source)}", true));
-            content.Children.Add(top);
-            content.Children.Add(Label(
-                $"Recipient: {(string.IsNullOrWhiteSpace(job.Recipient) ? "Not provided" : job.Recipient)}",
-                false,
-                "#A5B0C6"));
-            var details = Label($"{job.Collection}  ·  {job.Packs} {ChestWord(job.Packs)} × {job.Cards} cards", false, "#A5B0C6");
-            details.Margin = new Thickness(0, 0, 0, 1);
-            content.Children.Add(details);
-            var footer = new DockPanel { Margin = new Thickness(0, 2, 0, 0), LastChildFill = true };
-            if (job.Status == "needs_attention")
-            {
-                var actions = new StackPanel { Orientation = Orientation.Horizontal };
-                var markSent = MakeButton("Mark gifted", () => MarkGiftAsSent(job), "#174331");
-                markSent.Foreground = Brush("#52DB91");
-                markSent.Margin = new Thickness(6, 2, 0, 2);
-                markSent.Padding = new Thickness(8, 5, 8, 5);
-                markSent.ToolTip = "Use after confirming the gift was delivered in Streamloots.";
-                actions.Children.Add(markSent);
-                var retry = MakeButton("Retry", () => RetryGift(job), "#202B40");
-                retry.Foreground = Brush("#52DB91");
-                retry.Margin = new Thickness(6, 2, 0, 2);
-                retry.Padding = new Thickness(8, 5, 8, 5);
-                retry.ToolTip = "Queue another attempt if the gift was not delivered.";
-                actions.Children.Add(retry);
-                DockPanel.SetDock(actions, Dock.Right);
-                footer.Children.Add(actions);
-            }
-            var historyTime = job.Source == "streamloots_card" && !string.IsNullOrWhiteSpace(job.PlayedAt)
-                ? $"Card played · {FormatCardPlayedTime(job.PlayedAt)}"
-                : FormatTime(job.CreatedAt);
-            footer.Children.Add(Label(historyTime, false, "#7F8BA4"));
-            content.Children.Add(footer);
-            _historyList.Children.Add(row);
-            _historyFirstRow ??= row;
+            _historyList.Children.Remove(_historyShowMoreButton);
+            _historyShowMoreButton = null;
         }
-        if (page.HasMore)
-        {
-            var more = MakeButton("Show more claims", () =>
-            {
-                if (_historyVisibleLimit <= int.MaxValue - 200) _historyVisibleLimit += 200;
-                RenderHistory();
-            }, "#202B40");
-            more.HorizontalAlignment = HorizontalAlignment.Center;
-            more.Margin = new Thickness(0, 8, 0, 10);
-            _historyList.Children.Add(more);
-        }
+
+        var query = GetHistoryQuery();
+        var page = _giftQueue.HistoryPage(query.Source, query.Statuses, query.Username, _historyVisibleLimit, HistoryPageSize);
+        foreach (var job in page.Jobs) AppendHistoryRow(job);
+        _historyVisibleLimit += page.Jobs.Count;
+        if (page.HasMore) AddHistoryShowMoreButton();
     }
 
     private void OpenHistoryCleanupWindow()
@@ -4667,7 +4914,7 @@ public partial class MainWindow : Window
         footerStatus.Margin = new Thickness(0, 0, 0, 8);
         footer.Children.Add(footerStatus);
         var buttons = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Right };
-        var clearButton = MakeButton("Clear entire history", () =>
+        var clearButton = MakeButton("Clear entire history", async () =>
         {
             var count = _giftQueue.HistoryCount;
             if (count == 0)
@@ -4678,7 +4925,7 @@ public partial class MainWindow : Window
             if (!ShowDashboardConfirmation(cleanupWindow, "Clear entire history",
                     $"Permanently delete all {count} saved claim entries? This includes queued and sending gifts, which may be discarded. This cannot be undone.",
                     "Clear history")) return;
-            var removed = _giftQueue.DeleteHistory();
+            var removed = await _giftQueue.DeleteHistoryAsync();
             RenderHistory();
             RefreshHistoryNameSuggestions();
             cleanupWindow.Close();
@@ -4687,7 +4934,7 @@ public partial class MainWindow : Window
         clearButton.Foreground = Brush("#FF8585");
         clearButton.Margin = new Thickness(0, 0, 8, 0);
         buttons.Children.Add(clearButton);
-        var deleteButton = MakeButton("Delete matching", () =>
+        var deleteButton = MakeButton("Delete matching", async () =>
         {
             var usernameFilter = username.Text.Trim();
             var sourceFilter = source.SelectedItem as string ?? "All";
@@ -4705,7 +4952,7 @@ public partial class MainWindow : Window
             if (!ShowDashboardConfirmation(cleanupWindow, "Delete matching claims",
                     $"Permanently delete these {matchCount} claim record(s)? Matching queued or sending gifts will be discarded. This cannot be undone.",
                     "Delete claims")) return;
-            var removed = _giftQueue.DeleteHistory(usernameFilter, sourceCode, statusCode, cutoff);
+            var removed = await _giftQueue.DeleteHistoryAsync(usernameFilter, sourceCode, statusCode, cutoff);
             RenderHistory();
             RefreshHistoryNameSuggestions();
             footerStatus.Text = $"Deleted {removed} claim record(s).";
@@ -4925,9 +5172,9 @@ public partial class MainWindow : Window
         return measured.Width <= textBox.ActualWidth - 26;
     }
 
-    private void RetryGift(QueueJob job)
+    private async void RetryGift(QueueJob job)
     {
-        var retried = _giftQueue.Retry(job.JobId);
+        var retried = await _giftQueue.RetryAsync(job.JobId);
         if (retried is null)
         {
             MessageBox.Show(this, "This gift is no longer waiting for attention.", "Retry gift", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -4937,9 +5184,9 @@ public partial class MainWindow : Window
         RenderHistory();
     }
 
-    private void MarkGiftAsSent(QueueJob job)
+    private async void MarkGiftAsSent(QueueJob job)
     {
-        var marked = _giftQueue.MarkAsSent(job.JobId);
+        var marked = await _giftQueue.MarkAsSentAsync(job.JobId);
         if (marked is null)
         {
             MessageBox.Show(this, "This gift is no longer waiting for attention.", "Mark gifted", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -4953,6 +5200,7 @@ public partial class MainWindow : Window
     {
         if (_activityList is null) return;
         _activityList.Children.Clear();
+        _activityRowsByRedemptionId.Clear();
         if (_activity.Count == 0) { _activityList.Children.Add(Label("No Twitch redeems received this session yet.", false, "#8491AA")); return; }
         var sourceFilter = _activitySourceFilter?.SelectedItem as string ?? _config.ActivitySourceFilter;
         var username = (_activityUserFilter?.Text ?? _config.ActivityUserFilter).Trim();
@@ -4965,10 +5213,24 @@ public partial class MainWindow : Window
         if (entries.Length == 0) { _activityList.Children.Add(Label("No activity matches these filters.", false, "#8491AA")); return; }
         foreach (var item in entries)
         {
+            var row = CreateActivityRow(item);
+            _activityList.Children.Add(row);
+            _activityRowsByRedemptionId[item.RedemptionId] = row;
+        }
+    }
+
+    private Border CreateActivityRow(GiftActivity item) => new()
+    {
+        Background = Brush("#10182A"), BorderBrush = Brush("#26324A"), BorderThickness = new Thickness(0, 0, 0, 1),
+        CornerRadius = new CornerRadius(7), Padding = new Thickness(9, 5, 9, 5), Margin = new Thickness(0, 3, 0, 3),
+        Child = CreateActivityRowContent(item)
+    };
+
+    private UIElement CreateActivityRowContent(GiftActivity item)
+    {
             var content = new Grid();
             content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            var row = new Border { Background = Brush("#10182A"), BorderBrush = Brush("#26324A"), BorderThickness = new Thickness(0, 0, 0, 1), CornerRadius = new CornerRadius(7), Padding = new Thickness(9, 5, 9, 5), Margin = new Thickness(0, 3, 0, 3), Child = content };
             var failed = IsActivityFailure(item.Status);
             var linesAndAction = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             var textLines = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
@@ -5020,8 +5282,7 @@ public partial class MainWindow : Window
                 Grid.SetRow(errorLabel, 1);
                 content.Children.Add(errorLabel);
             }
-            _activityList.Children.Add(row);
-        }
+            return content;
     }
 
     private static bool IsActivityFailure(string status) =>
@@ -5048,7 +5309,7 @@ public partial class MainWindow : Window
         return "#91A7FF";
     }
 
-    private void RepeatActivityGift(GiftActivity item)
+    private async void RepeatActivityGift(GiftActivity item)
     {
         var request = new GiftRequest(
             $"manual-repeat:{Guid.NewGuid():N}",
@@ -5060,7 +5321,7 @@ public partial class MainWindow : Window
             item.Keyword,
             item.Packs,
             item.Cards);
-        QueueRequest(request, item.Viewer, item.Reward, item.Recipient);
+        await QueueRequestAsync(request, item.Viewer, item.Reward, item.Recipient);
     }
 
     private void RetryActivityGift(GiftActivity item)

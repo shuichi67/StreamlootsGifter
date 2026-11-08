@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
 using System.Net.WebSockets;
+using System.Collections.Generic;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -25,6 +26,9 @@ public sealed class TwitchService : IAsyncDisposable
     private string _accessToken = "";
     private string _refreshToken = "";
     private DateTimeOffset _tokenExpiresAt;
+    private readonly object _chatFilterGate = new();
+    private HashSet<string> _chatKeywords = new(StringComparer.OrdinalIgnoreCase);
+    private long _lastChatActivityRaisedAt;
 
     private sealed class TwitchRateLimitException(TimeSpan retryAfter, string message) : Exception(message)
     {
@@ -39,6 +43,17 @@ public sealed class TwitchService : IAsyncDisposable
     public event Action<bool>? ChatReadyChanged;
     public event Action<RedemptionEvent>? RedemptionReceived;
     public event Action<ChatMessageEvent>? ChatMessageReceived;
+    public event Action? ChatActivityReceived;
+
+    public void SetChatKeywordFilter(IEnumerable<string> keywords)
+    {
+        var updated = new HashSet<string>(keywords.Where(keyword => !string.IsNullOrWhiteSpace(keyword)).Select(keyword => keyword.Trim()), StringComparer.OrdinalIgnoreCase);
+        lock (_chatFilterGate)
+        {
+            _chatKeywords = updated;
+            _lastChatActivityRaisedAt = 0;
+        }
+    }
 
     public TwitchService(string? clientId = null)
     {
@@ -392,11 +407,23 @@ public sealed class TwitchService : IAsyncDisposable
             var text = message.TryGetProperty("text", out var messageText) ? messageText.GetString() ?? "" : "";
             var sourceBroadcaster = evt.TryGetProperty("source_broadcaster_user_id", out var source) ? source.GetString() : null;
             if (!string.IsNullOrEmpty(sourceBroadcaster)) return;
-            ChatMessageReceived?.Invoke(new ChatMessageEvent(
+            var chatEvent = new ChatMessageEvent(
                 evt.TryGetProperty("chatter_user_id", out var id) ? id.GetString() ?? "" : "",
                 evt.TryGetProperty("chatter_user_login", out var login) ? login.GetString() ?? "" : "",
                 evt.TryGetProperty("chatter_user_name", out var name) ? name.GetString() ?? "" : "",
-                text));
+                text);
+            bool matchesKeyword;
+            bool publishActivity;
+            var now = Environment.TickCount64;
+            lock (_chatFilterGate)
+            {
+                if (_chatKeywords.Count == 0) return;
+                matchesKeyword = _chatKeywords.Contains(text.Trim());
+                publishActivity = now - _lastChatActivityRaisedAt >= 3000;
+                if (publishActivity) _lastChatActivityRaisedAt = now;
+            }
+            if (publishActivity) ChatActivityReceived?.Invoke();
+            if (matchesKeyword) ChatMessageReceived?.Invoke(chatEvent);
         }
     }
 

@@ -1,7 +1,31 @@
 let isWorking = false;
 const isActivityFeed = /\/activity-feed(?:\/|$)/i.test(location.pathname);
 let activityFeedReady = false;
-const seenActivityCards = new Set();
+const seenActivityCards = new Map();
+const seenActivityCardTtlMs = 10 * 60 * 1000;
+const maxSeenActivityCards = 5000;
+
+function hasSeenActivityCard(eventId, now = Date.now()) {
+  const expiresAt = seenActivityCards.get(eventId);
+  if (!expiresAt) return false;
+  if (expiresAt <= now) {
+    seenActivityCards.delete(eventId);
+    return false;
+  }
+  return true;
+}
+
+function rememberActivityCard(eventId, now = Date.now()) {
+  if (!eventId) return;
+  for (const [id, expiresAt] of seenActivityCards) {
+    if (expiresAt > now) break;
+    seenActivityCards.delete(id);
+  }
+  seenActivityCards.delete(eventId);
+  seenActivityCards.set(eventId, now + seenActivityCardTtlMs);
+  while (seenActivityCards.size > maxSeenActivityCards)
+    seenActivityCards.delete(seenActivityCards.keys().next().value);
+}
 let streamlootsLanguageCache = "";
 let streamlootsLanguageCacheUntil = 0;
 let streamlootsLanguageRequest = null;
@@ -93,11 +117,48 @@ async function waitFor(getValue, timeout = 10000) {
   throw new Error("Timed out waiting for the Streamloots gift form.");
 }
 
+let cachedGiftForm = null;
+let cachedGiftAction = null;
+let giftActionLookupExpiresAt = 0;
+const giftActionLabels = new Set(["Gift packs", "Regalar cofres", "Regalar packs"]);
+
+function findGiftAction() {
+  const isGiftAction = element => giftActionLabels.has((element?.textContent || "").replace(/\s+/g, " ").trim());
+  if (cachedGiftAction?.isConnected && visible(cachedGiftAction) && isGiftAction(cachedGiftAction)) return cachedGiftAction;
+  cachedGiftAction = null;
+  if (Date.now() < giftActionLookupExpiresAt) return null;
+  giftActionLookupExpiresAt = Date.now() + 3000;
+  cachedGiftAction = [...document.querySelectorAll("button, [role='button']")]
+    .find(element => visible(element) && isGiftAction(element)) || null;
+  return cachedGiftAction;
+}
+
 function findGiftForm() {
-  const candidates = [...document.querySelectorAll('form, [role="dialog"], article, section, [class*="modal"], [class*="Modal"], [class*="dialog"], [class*="Dialog"], [class*="drawer"], [class*="Drawer"]')]
-    .filter(element => visible(element) && (/Gift packs|Regalar cofres|Regalar packs/i.test(element.innerText || "") ||
-      element.querySelector("#gift-chests-username, #gift-chests-quantity, #setId-public-sets-picker")));
-  return candidates.sort((a, b) => a.querySelectorAll("*").length - b.querySelectorAll("*").length)[0] || null;
+  // These stable controls uniquely identify the gift form. Resolve their
+  // nearest shared container directly instead of scanning page candidates,
+  // reading their text, and counting descendants on every queue poll.
+  const recipient = document.getElementById("gift-chests-username");
+  const quantity = document.getElementById("gift-chests-quantity");
+  const picker = document.getElementById("setId-public-sets-picker");
+  if (!recipient || !quantity || !picker || !visible(recipient) || !visible(quantity) || !visible(picker)) {
+    cachedGiftForm = null;
+    return null;
+  }
+
+  if (cachedGiftForm?.isConnected && visible(cachedGiftForm) &&
+      cachedGiftForm.contains(recipient) && cachedGiftForm.contains(quantity) && cachedGiftForm.contains(picker))
+    return cachedGiftForm;
+
+  for (let ancestor = recipient.parentElement, depth = 0;
+       ancestor && ancestor !== document.body && ancestor !== document.documentElement && depth < 16;
+       ancestor = ancestor.parentElement, depth++) {
+    if (ancestor.contains(quantity) && ancestor.contains(picker)) {
+      cachedGiftForm = ancestor;
+      return cachedGiftForm;
+    }
+  }
+  cachedGiftForm = null;
+  return null;
 }
 
 async function closeGiftForm(form) {
@@ -234,9 +295,10 @@ function parseActivityFeedRow(element) {
 
 function getActivityFeedRows() {
   const matches = [];
-  // Streamloots exposes feed entries as list items with a nested button. Avoid
-  // walking every div and section on the full creator page on each scan.
-  const nodes = document.querySelectorAll("article, li, button, a[href], [role='button']");
+  // Keep fallback scans inside the activity surface instead of traversing the
+  // entire creator page and its unrelated controls.
+  const root = document.querySelector("main, [role='main']") || document.body;
+  const nodes = root.querySelectorAll("article, li, button, a[href], [role='button']");
   for (const element of nodes) {
     if (!visible(element)) continue;
     const parsed = parseActivityFeedRow(element);
@@ -245,13 +307,17 @@ function getActivityFeedRows() {
   // Streamloots often renders the same row text in several nested elements.
   // Keep the outer row for each physical entry, but preserve separate rows
   // even when user, card, and rounded relative time are identical.
-  return matches.filter(entry => !matches.some(other =>
-    other.element !== entry.element &&
-    other.element.contains(entry.element) &&
-    other.redeemer.toLocaleLowerCase() === entry.redeemer.toLocaleLowerCase() &&
-    other.cardName === entry.cardName &&
-    other.relativeTime.toLocaleLowerCase() === entry.relativeTime.toLocaleLowerCase()
-  ));
+  const entriesByElement = new Map(matches.map(entry => [entry.element, entry]));
+  return matches.filter(entry => {
+    const signature = `${entry.redeemer.toLocaleLowerCase()}|${entry.cardName}|${entry.relativeTime.toLocaleLowerCase()}`;
+    for (let ancestor = entry.element.parentElement; ancestor && root.contains(ancestor); ancestor = ancestor.parentElement) {
+      const parentEntry = entriesByElement.get(ancestor);
+      if (!parentEntry) continue;
+      const parentSignature = `${parentEntry.redeemer.toLocaleLowerCase()}|${parentEntry.cardName}|${parentEntry.relativeTime.toLocaleLowerCase()}`;
+      if (parentSignature === signature) return false;
+    }
+    return true;
+  });
 }
 
 function getSelectedCardDetails() {
@@ -467,6 +533,8 @@ function initializeActivityFeedWatcher() {
   let lastObservedCursor = null;
   let cursorCheckTimer = null;
   let processing = false;
+  let observer = null;
+  let feedPoll = null;
   let rowSequence = 0;
   const feedSession = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const seenRows = new WeakMap();
@@ -498,6 +566,7 @@ function initializeActivityFeedWatcher() {
     void chrome.runtime.sendMessage({ type: "record-activity-feed-status", ready: true }).catch(() => {});
   };
   const queueEvent = (entry, deliveryId) => {
+    if (entry.stableIdentity && hasSeenActivityCard(entry.eventId)) return;
     if (eventStates.has(deliveryId)) {
       debug("Event already in the local queue", { id: deliveryId });
       return;
@@ -524,7 +593,12 @@ function initializeActivityFeedWatcher() {
     };
   };
   const acceptCursorPoll = message => {
-    apiPollSeen = true;
+    if (!apiPollSeen) {
+      apiPollSeen = true;
+      observer?.disconnect();
+      if (feedPoll) clearInterval(feedPoll);
+      debug("API event polling is active; disabled DOM fallback observation.");
+    }
     markFeedReady();
     const cursor = String(message.cursor || "");
     if (!cursor) return;
@@ -585,15 +659,30 @@ function initializeActivityFeedWatcher() {
     let processedAny = false;
     try {
       while (true) {
-        const state = [...eventStates.values()]
-          .filter(item => !item.done && item.nextAttemptAt <= Date.now())
-          .sort((a, b) => a.detectedAt - b.detectedAt)[0];
+        const now = Date.now();
+        let state = null;
+        for (const candidate of eventStates.values()) {
+          if (now - candidate.detectedAt > seenActivityCardTtlMs) {
+            debug("Dropping an event that exceeded the replay window", {
+              id: candidate.entry.eventId || candidate.entry.deliveryId,
+              card: candidate.entry.cardName
+            });
+            if (candidate.entry.stableIdentity) rememberActivityCard(candidate.entry.eventId, now);
+            eventStates.delete(candidate.entry.deliveryId);
+            continue;
+          }
+          if (candidate.nextAttemptAt <= now) {
+            state = candidate;
+            break;
+          }
+        }
         if (!state) break;
         try {
           await processEvent(state);
           processedAny = true;
           if (state.done) {
-            if (state.entry.stableIdentity) seenActivityCards.add(state.entry.eventId);
+            if (state.entry.stableIdentity) rememberActivityCard(state.entry.eventId);
+            eventStates.delete(state.entry.deliveryId);
           }
         } catch (error) {
           state.attempts++;
@@ -605,7 +694,7 @@ function initializeActivityFeedWatcher() {
           // later redeem behind its backoff timer.
         }
       }
-      if (processedAny && [...eventStates.values()].every(item => item.done)) await recordPollStatus("");
+      if (processedAny && eventStates.size === 0) await recordPollStatus("");
     } finally {
       processing = false;
     }
@@ -633,10 +722,10 @@ function initializeActivityFeedWatcher() {
           candidatesFound++;
           if (!isWithinCardAgeLimit(entry)) {
             debug("Ignoring event older than the 10-minute window", { id: entry.eventId, card: entry.cardName, playedAt: entry.playedAt });
-            seenActivityCards.add(entry.eventId);
+            rememberActivityCard(entry.eventId);
             continue;
           }
-          if (seenActivityCards.has(entry.eventId)) continue;
+          if (hasSeenActivityCard(entry.eventId)) continue;
           queueEvent(entry, `streamloots-api:${entry.eventId}`);
         }
       }
@@ -684,33 +773,27 @@ function initializeActivityFeedWatcher() {
   const startBaseline = () => {
     if (!baselineTimer && !baselineReady) scheduleBaseline();
   };
-  const couldBeFeedMutation = record => {
-    const targets = [record.target, ...record.addedNodes];
-    return targets.some(target => {
-      let element = target.nodeType === Node.ELEMENT_NODE ? target : target.parentElement;
-      for (let depth = 0; element && depth < 6; depth++, element = element.parentElement) {
-        if (/(?:has played|ha jugado|jugó|jugaba)/i.test(element.innerText || element.textContent || "")) return true;
-      }
-      return false;
-    });
-  };
-  const observer = new MutationObserver(records => {
+  const observerRoot = document.querySelector("main, [role='main']") || document.body;
+  observer = new MutationObserver(records => {
+    if (apiPollSeen) return;
     startBaseline();
-    if (!records.some(couldBeFeedMutation)) return;
+    const relevantChange = records.some(record =>
+      (record.type === "childList" && record.addedNodes.length > 0) || record.type === "characterData");
+    if (!relevantChange) return;
     if (!baselineReady) scheduleBaseline();
-    else if (!scanTimer) scanTimer = setTimeout(() => { scanTimer = null; scan(); }, 75);
+    else if (!scanTimer) scanTimer = setTimeout(() => { scanTimer = null; scan(); }, 150);
   });
-  observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+  observer.observe(observerRoot, { childList: true, subtree: true, characterData: true });
   startBaseline();
   const baselinePoll = setInterval(() => {
     if (baselineReady) clearInterval(baselinePoll);
     else startBaseline();
   }, 750);
-  const feedPoll = setInterval(scan, 300);
+  feedPoll = setInterval(scan, 3000);
   cursorCheckTimer = setInterval(() => checkCursor("10-second timer"), 10_000);
   window.addEventListener("pagehide", () => {
     clearInterval(baselinePoll);
-    clearInterval(feedPoll);
+    if (feedPoll) clearInterval(feedPoll);
     clearInterval(cursorCheckTimer);
     if (scanTimer) clearTimeout(scanTimer);
     window.removeEventListener("message", handleHookMessage);
@@ -723,8 +806,7 @@ async function openGiftForm() {
   if (form) return form;
 
   const language = await getStreamlootsLanguage();
-  const menuButton = exactLocalizedAction(document, "button, [role='button']",
-    ["Gift packs"], ["Regalar cofres", "Regalar packs"], language);
+  const menuButton = findGiftAction();
   if (!menuButton) {
     throw new Error(language === "Spanish"
       ? "Abre la página de creador de Streamloots y asegúrate de que esté disponible la opción «Regalar cofres» (o «Regalar packs»)."
@@ -736,8 +818,7 @@ async function openGiftForm() {
 }
 
 function canOpenGiftForm() {
-  const actions = ["Gift packs", "Regalar cofres", "Regalar packs"];
-  return Boolean(findGiftForm() || actions.some(label => exactTextElement(document, "button, [role='button']", label)));
+  return Boolean(findGiftForm() || findGiftAction());
 }
 
 function setInputValue(input, value) {
@@ -776,29 +857,100 @@ async function chooseCollection(form, collection) {
   const isSelected = () => selectedLines().some(line => line === expected);
   if (isSelected()) return;
 
-  const matchingVisibleElements = () => [...document.querySelectorAll("*")].filter(element => {
-    if (!visible(element) || element === picker || picker.contains(element)) return false;
-    const lines = (element.innerText || element.textContent || "").split(/[\r\n]+/).map(normalize).filter(Boolean);
-    return lines.includes(expected) || normalize(element.getAttribute("aria-label")) === expected;
+  const menuRootSelector = [
+    '[role="listbox"]', '[role="menu"]', '[role="dialog"]', '[data-radix-popper-content-wrapper]',
+    '[class*="popover"]', '[class*="Popover"]', '[class*="dropdown"]', '[class*="Dropdown"]',
+    '[class*="menu"]', '[class*="Menu"]'
+  ].join(",");
+  const menuItemSelector = [
+    '[role="option"]', '[role="menuitem"]', '[role="radio"]', "button", "li", "[tabindex]",
+    '[class*="option"]', '[class*="Option"]', '[class*="item"]', '[class*="Item"]'
+  ].join(",");
+  const portalRoots = new Set();
+  const addMenuRootsFrom = node => {
+    if (!(node instanceof Element)) return;
+    const consider = root => {
+      const lines = (root.innerText || root.textContent || "").split(/[\r\n]+/).map(normalize).filter(Boolean);
+      if (lines.includes(expected)) portalRoots.add(root);
+    };
+    if (node.matches(menuRootSelector)) consider(node);
+    for (const root of node.querySelectorAll(menuRootSelector)) consider(root);
+  };
+  const hasExpectedChoice = root => (root.innerText || root.textContent || "")
+    .split(/[\r\n]+/).map(normalize).includes(expected);
+  const getMenuRoots = () => {
+    const controlledIds = `${picker.getAttribute("aria-controls") || ""} ${picker.getAttribute("aria-owns") || ""}`
+      .split(/\s+/).filter(Boolean);
+    const controlled = controlledIds.map(id => document.getElementById(id)).filter(root => root && visible(root));
+    if (controlled.length) return controlled;
+
+    const localRoots = [...form.querySelectorAll(menuRootSelector)]
+      .filter(root => visible(root) && root !== picker && !picker.contains(root) && hasExpectedChoice(root));
+    if (localRoots.length) return localRoots;
+
+    // Some Streamloots menus render in a portal outside the form. A short lived
+    // observer records only menu surfaces added or revealed after this picker
+    // opens; it avoids searching the whole page for menu text.
+    const pickerRect = picker.getBoundingClientRect();
+    const nearbyPortalRoots = [...portalRoots].filter(root => root.isConnected && visible(root) && root !== picker && !picker.contains(root) && hasExpectedChoice(root));
+    nearbyPortalRoots.sort((left, right) => {
+      const distance = root => {
+        const rect = root.getBoundingClientRect();
+        const dx = Math.max(rect.left - pickerRect.right, pickerRect.left - rect.right, 0);
+        const dy = Math.max(rect.top - pickerRect.bottom, pickerRect.top - rect.bottom, 0);
+        return dx * dx + dy * dy;
+      };
+      return distance(left) - distance(right);
+    });
+    return nearbyPortalRoots.slice(0, 1);
+  };
+  const candidateItems = () => {
+    let roots = getMenuRoots();
+    if (!roots.length) {
+      const localRoot = picker.parentElement?.parentElement;
+      if (localRoot && visible(localRoot)) roots = [localRoot];
+    }
+    return roots.flatMap(root => [...root.querySelectorAll(menuItemSelector)]
+      .filter(element => visible(element) && !picker.contains(element)));
+  };
+  const previouslyVisible = new Set(candidateItems());
+  const portalObserver = new MutationObserver(records => {
+    for (const record of records) {
+      if (record.type === "childList") {
+        for (const node of record.addedNodes) addMenuRootsFrom(node);
+      }
+      const changedElement = record.target instanceof Element ? record.target : record.target.parentElement;
+      const changedRoot = changedElement?.closest(menuRootSelector);
+      if (changedRoot) addMenuRootsFrom(changedRoot);
+    }
   });
-  const previouslyVisible = new Set(matchingVisibleElements());
+  portalObserver.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["class", "role", "hidden", "aria-hidden", "style"]
+  });
   picker.click();
-  const option = await waitFor(() => {
-    const selectors = ['[role="option"]', '[role="menuitem"]', '[role="radio"]', '[role="listbox"] button', 'button', 'li', '[tabindex="0"]'];
-    const newlyVisible = matchingVisibleElements().filter(element => !previouslyVisible.has(element));
-    const semanticOption = selectors
-      .flatMap(selector => [...document.querySelectorAll(selector)])
-      .find(element => newlyVisible.includes(element));
-    if (semanticOption) return semanticOption;
-    // Some Streamloots builds render their menu rows as plain div/span nodes.
-    // Only consider exact matches that became visible after opening this picker.
-    return newlyVisible
-      .filter(element => normalize(element.innerText || element.textContent) === expected)
-      .sort((a, b) => a.querySelectorAll("*").length - b.querySelectorAll("*").length)[0] || null;
-  }, 7000).catch(() => null);
+  let option = null;
+  try {
+    option = await waitFor(() => {
+      const newlyVisible = candidateItems().filter(element => !previouslyVisible.has(element));
+      const matches = newlyVisible.filter(element => {
+        const lines = (element.innerText || element.textContent || "").split(/[\r\n]+/).map(normalize).filter(Boolean);
+        return lines.includes(expected) || normalize(element.getAttribute("aria-label")) === expected;
+      });
+      const depth = element => {
+        let count = 0;
+        for (let current = element; current; current = current.parentElement) count++;
+        return count;
+      };
+      return matches.sort((a, b) => depth(b) - depth(a))[0] || null;
+    }, 7000).catch(() => null);
+  } finally {
+    portalObserver.disconnect();
+  }
   if (!option) {
-    const visibleOptions = [...document.querySelectorAll('[role="option"], [role="menuitem"], [role="radio"], [role="listbox"] button, button, li, [tabindex="0"]')]
-      .filter(visible)
+    const visibleOptions = candidateItems()
       .map(element => (element.innerText || element.textContent || "").replace(/\s+/g, " ").trim())
       .filter(Boolean);
     throw new Error(`Could not find collection “${collection}” in the open selector. Visible choices: ${visibleOptions.slice(0, 12).join(" | ") || "none detected"}`);

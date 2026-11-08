@@ -2,7 +2,7 @@
 
 **A Windows desktop app for automating Streamloots gifts triggered by Twitch channel point redeems and Streamloots card redeems.**
 
-[Download the latest release](https://github.com/shuichi67/StreamlootsGifter/releases/latest) · [View all releases](https://github.com/shuichi67/StreamlootsGifter/releases)
+[Download Streamloots Gifter 0.6.0](https://github.com/shuichi67/StreamlootsGifter/releases/tag/0.6.0) · [View all releases](https://github.com/shuichi67/StreamlootsGifter/releases)
 
 Streamloots Gifter connects Twitch redeems and Streamloots card activity to configured gifts. It runs on the streamer’s PC and pairs with a browser extension to monitor the Streamloots Activity Feed and carry out gifts.
 
@@ -35,14 +35,14 @@ The in-app updater requires both the GitHub SHA-256 digest and a publisher signa
 - Windows 10 or 11, 64-bit.
 - A Twitch account for the streamer.
 - A Streamloots creator account with access to the relevant collections and gifting controls.
-- Google Chrome (recommended) or other Chromium-based browsers.
+- Google Chrome, Brave, or Microsoft Edge. The extension must be loaded in the browser where Streamloots is open.
 - A Twitch account for the streamer to authorize through Twitch’s official sign-in page.
 
 ## First-time setup
 
 ### 1. Download and extract the app
 
-1. Open the [latest release](https://github.com/shuichi67/StreamlootsGifter/releases/latest).
+1. Open the [Streamloots Gifter 0.6.0 release](https://github.com/shuichi67/StreamlootsGifter/releases/tag/0.6.0).
 2. Download `StreamlootsGifter-Windows-x64-...zip`.
 3. Extract the ZIP to a folder the streamer can write to, such as `Documents\Streamloots Gifter`.
 4. Keep the extracted folder in place. The app stores its local settings and history alongside the application.
@@ -55,7 +55,7 @@ The app saves the Twitch session encrypted for the current Windows account. Twit
 
 ### 3. Install the browser extension
 
-1. In Chrome, open `chrome://extensions`.
+1. In your browser, open its extension management page (`chrome://extensions`, `brave://extensions`, or `edge://extensions`).
 2. Turn on **Developer mode**.
 3. Choose **Load unpacked**.
 4. Select the `streamloots_extension` folder inside the extracted app folder.
@@ -65,7 +65,7 @@ The extension is loaded locally; it is not installed from the Chrome Web Store.
 
 ### 4. Open Streamloots and configure gifts
 
-- Keep the Streamloots Activity Feed open in the browser while using card automation.
+- Keep the Streamloots Activity Feed open and visible in the browser while using card automation. Add `streamloots.com` to the browser’s “Always keep these sites active” list if available. This prevents memory-based tab deactivation, but background throttling can still pause page activity, so avoid minimizing the browser or covering it with other windows while relying on automatic gifts. The Streamloots Gifter app can remain open over the browser if gifting continues to work; confirm the Bridge status stays **Connected**.
 - In the app, configure the Twitch channel point rewards and Streamloots card names you want to automate.
 - Choose each reward’s collection and the number of chests and cards to gift.
 - Use **Viewer Aliases** in Settings if viewers commonly enter shortened or alternate versions of their usernames.
