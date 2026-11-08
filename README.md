@@ -2,7 +2,7 @@
 
 **A Windows desktop app for automating Streamloots gifts triggered by Twitch channel point redeems and Streamloots card redeems.**
 
-[Download Streamloots Gifter 0.6.0](https://github.com/shuichi67/StreamlootsGifter/releases/tag/0.6.0) · [View all releases](https://github.com/shuichi67/StreamlootsGifter/releases)
+[Download Streamloots Gifter 0.6.5](https://github.com/shuichi67/StreamlootsGifter/releases/tag/0.6.5) · [View all releases](https://github.com/shuichi67/StreamlootsGifter/releases)
 
 Streamloots Gifter connects Twitch redeems and Streamloots card activity to configured gifts. It runs on the streamer’s PC and pairs with a browser extension to monitor the Streamloots Activity Feed and carry out gifts.
 
@@ -23,9 +23,14 @@ then uncomment and update this line:
 - Customize the dashboard layout and choose a theme.
 - Pair the desktop app with the browser extension through a local Bridge connection.
 - Check for and install app updates from Settings.
+- Updates are staged and backed up before installation; if copying or app startup fails, the updater restores the previous files.
+- Export or import configuration and reset settings from the Configuration Backup section in Settings.
 - The current build also retains the optional Free Chest Hour feature.
 - Choose English or Spanish Streamloots labels in Settings; the browser extension recognizes both languages.
 
+## Publishing updates
+
+The in-app updater requires both the GitHub SHA-256 digest and a publisher signature. The release builder uses the ignored local file `.update-signing-private.pem` to sign the update ZIP. Keep that private key backed up securely and never commit or upload it. Upload both `StreamlootsGifter-Update-...zip` and its matching `.zip.sig` file to the same GitHub release. The app has the corresponding public key pinned in its updater and refuses unsigned packages.
 
 ## What you need
 
@@ -39,7 +44,7 @@ then uncomment and update this line:
 
 ### 1. Download and extract the app
 
-1. Open the [Streamloots Gifter 0.6.0 release](https://github.com/shuichi67/StreamlootsGifter/releases/tag/0.6.0).
+1. Open the [Streamloots Gifter 0.6.5 release](https://github.com/shuichi67/StreamlootsGifter/releases/tag/0.6.5).
 2. Download `StreamlootsGifter-Windows-x64-...zip`.
 3. Extract the ZIP to a folder the streamer can write to, such as `Documents\Streamloots Gifter`.
 4. Keep the extracted folder in place. The app stores its local settings and history alongside the application.
